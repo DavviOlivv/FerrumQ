@@ -1,14 +1,16 @@
 # Testing Strategy
 
-FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer. Milestone 2 adds broker behavior coverage for synchronous in-memory delivery semantics.
+FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer. Milestone 2 adds broker behavior coverage for synchronous in-memory delivery semantics. Milestone 3 adds filesystem-backed storage coverage for the local append-only log foundation.
 
 ## Unit Tests
 
-Every Rust crate and TypeScript package should keep focused unit tests for local behavior. Milestone 1 includes `msg-core` unit tests for validated names and identifiers, topic partition configuration, message envelope construction, consumer groups, consumers, subscriptions, delivery attempts, ACK/NACK commands, retry policy validation, dead-letter reasons, delivery states, and serde round trips. Milestone 2 adds `msg-broker` tests for create topic, publish partition assignment, consume pending behavior, ACK, NACK, retry backoff, lease expiry, DLQ routing, offset uniqueness, and no-redelivery invariants. Other crates and TypeScript packages still keep their smoke coverage.
+Every Rust crate and TypeScript package should keep focused unit tests for local behavior. Milestone 1 includes `msg-core` unit tests for validated names and identifiers, topic partition configuration, message envelope construction, consumer groups, consumers, subscriptions, delivery attempts, ACK/NACK commands, retry policy validation, dead-letter reasons, delivery states, and serde round trips. Milestone 2 adds `msg-broker` tests for create topic, publish partition assignment, consume pending behavior, ACK, NACK, retry backoff, lease expiry, DLQ routing, offset uniqueness, and no-redelivery invariants. Milestone 3 keeps `msg-storage` unit coverage minimal and emphasizes integration tests because correctness depends on filesystem layout and byte-level recovery behavior. Other crates and TypeScript packages still keep their smoke coverage.
 
 ## Integration Tests
 
-Milestone 2 uses Rust integration-style tests against the public `msg-broker` API while keeping storage and runtime adapters deferred. Future integration tests will exercise crate boundaries, storage ports, broker orchestration, and runtime wiring without relying on external services.
+Milestone 2 uses Rust integration-style tests against the public `msg-broker` API while keeping storage and runtime adapters deferred. Milestone 3 uses Rust integration tests against the public `msg-storage` API with `tempfile` roots for first append offset, monotonic offsets, bounded reads, future-offset reads, reopen recovery, topic and partition isolation, segment rolling, reads across segment boundaries, invalid configuration, and validated topic path safety.
+
+Storage recovery tests directly mutate local segment files to cover truncated final frames, checksum mismatch in the final trailing frame, and checksum mismatch in the middle of a segment. Milestone 3 persists message records only; durable ACK/NACK state, retry state, consumer cursors, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred. Future integration tests will exercise those areas without relying on external services.
 
 ## End-to-End Tests
 
@@ -28,7 +30,7 @@ Use `cargo-fuzz` for protocol parsing, storage record parsing, recovery, and cor
 
 ## Crash and Recovery Tests
 
-Durable storage milestones must include tests for broker restart, partial segment write, corrupted record, cursor restoration, and DLQ recovery.
+Durable storage milestones must include tests for restart, partial segment write, corrupted record, cursor restoration, and DLQ recovery. Milestone 3 covers storage-local reopen recovery, partial trailing-frame truncation, final trailing-frame checksum repair, and middle-of-segment checksum errors. Broker restart, cursor restoration, ACK/NACK state, retry state, and DLQ recovery remain future Milestone 4+ responsibilities.
 
 ## Benchmarks
 

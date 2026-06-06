@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message log foundation in `msg-storage`.
 
 ## 1. Product Vision
 
@@ -17,6 +17,8 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No TypeScript-owned broker semantics.
 - No production broker daemon behavior in Milestone 2.
 - No durable storage implementation in Milestone 2.
+- No durable broker delivery state, ACK/NACK cursor persistence, retry persistence, or DLQ persistence in Milestone 3.
+- No broker/storage wiring in Milestone 3.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
 
@@ -36,7 +38,7 @@ Messages use a CloudEvents-inspired envelope with stable metadata: ID, source, t
 
 ## 7. Topics, Partitions, Offsets
 
-Topics are logical streams. Partitions are ordered append sequences inside a topic. Offsets identify records within a partition. Milestone 2 stores each topic partition as an append-only in-memory vector. Offsets are zero-based and monotonic per partition. Messages with a partition key use deterministic FNV-1a 64-bit hashing over key bytes modulo partition count. Messages without a key use a deterministic per-topic round-robin counter. Ordering is guaranteed only within the same topic partition, not globally.
+Topics are logical streams. Partitions are ordered append sequences inside a topic. Offsets identify records within a partition. Milestone 2 stores each broker topic partition as an append-only in-memory vector. Milestone 3 adds a separate `msg-storage` partition log that persists message records to local segment files with the same zero-based monotonic offset model. Messages with a partition key use deterministic FNV-1a 64-bit hashing over key bytes modulo partition count. Messages without a key use a deterministic per-topic round-robin counter. Ordering is guaranteed only within the same topic partition, not globally.
 
 ## 8. Consumer Groups and Cursors
 
@@ -44,7 +46,7 @@ Consumer groups coordinate consumption and track cursors. Milestone 2 maintains 
 
 ## 9. Publish Flow
 
-Milestone 2 publish flow validates the topic exists, selects a partition deterministically, appends the envelope to the in-memory partition log, and returns topic, partition, offset, and message ID metadata. Durable publish conditions remain future work.
+Milestone 2 publish flow validates the topic exists, selects a partition deterministically, appends the envelope to the in-memory partition log, and returns topic, partition, offset, and message ID metadata. Milestone 3 proves durable message-record append/read/recovery in `msg-storage`, but `msg-broker` publish still uses the Milestone 2 in-memory path until broker/storage wiring is added.
 
 ## 10. Consume Flow
 
@@ -72,11 +74,15 @@ Backpressure applies when memory, storage, partition depth, consumer lag, or ret
 
 ## 16. Storage Model
 
-The target storage model is an append-only log per topic partition. Milestone 2 uses append-only in-memory vectors local to `msg-broker`. Durable milestones add segment files, checksums, indexes, fsync policy, crash recovery, and corruption handling.
+The target storage model is an append-only log per topic partition. Milestone 2 uses append-only in-memory vectors local to `msg-broker`. Milestone 3 implements `msg-storage` as a synchronous local durable storage adapter/foundation with segment files at `<root>/topics/<topic>/partitions/<partition-id>/<20-digit-base-offset>.log`.
+
+Each Milestone 3 storage record is framed as `u32_le record_length`, `u32_le crc32(payload)`, and a compact deterministic JSON payload containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`. Recovery scans segment files in base-offset order, validates checksums, JSON, topic, partition, and offset continuity, and repairs only a corrupted or truncated trailing record in the final segment.
+
+Milestone 3 persists message records only. Durable ACK/NACK state, retry state, consumer cursors, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred.
 
 ## 17. Crash and Recovery Expectations
 
-A successfully published message must be recoverable according to the configured durability policy. Recovery must rebuild broker state from durable records without advancing unacked cursors incorrectly.
+A message appended through `msg-storage` must be recoverable according to the local segment recovery rules. Once `msg-broker` is wired to storage in a later milestone, recovery must rebuild broker state from durable records without advancing unacked cursors incorrectly. ACK/NACK state, retry state, consumer cursors, and DLQ state remain in-memory and deferred after Milestone 3.
 
 ## 18. Control Plane
 
@@ -96,7 +102,7 @@ Early milestones assume local development. Authentication, authorization, multi-
 
 ## 22. Testing Strategy Summary
 
-The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Later milestones add durable-storage integration tests, E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
+The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
 
 ## 23. Milestone Roadmap
 
@@ -104,7 +110,7 @@ The roadmap is defined in [MILESTONES.md](MILESTONES.md), from project skeleton 
 
 ## 24. Invariants
 
-- A successfully published message must be recoverable according to the configured durability policy.
+- A message appended through durable storage must be recoverable according to the configured durability policy.
 - A delivered but unacked message may be delivered again.
 - At-least-once delivery allows duplicates.
 - Consumers are expected to be idempotent.

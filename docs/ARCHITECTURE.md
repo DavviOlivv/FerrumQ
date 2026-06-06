@@ -10,7 +10,7 @@ The monolith is modular through crate boundaries:
 
 - `msg-core`: pure domain types and invariants. Milestone 1 implements validated core newtypes, message envelopes, topics, partitions, consumer groups, subscriptions, delivery attempts, ACK/NACK commands, retry policy values, dead-letter reason values, typed domain errors, and serde support here.
 - `msg-protocol`: shared protocol DTOs and serialization boundaries.
-- `msg-storage`: storage ports and future implementations.
+- `msg-storage`: local durable storage adapter/foundation. Milestone 3 implements a synchronous segment-backed append-only log per topic partition with framed JSON records, CRC32 checksums, deterministic offset assignment, segment rolling, reopen recovery, and final-segment trailing-record repair.
 - `msg-broker`: broker orchestration and delivery flow. Milestone 2 implements this as synchronous deterministic in-memory state with topic creation, publish, consume, ACK, NACK, retry maintenance, lease expiry, and in-memory DLQ.
 - `msg-runtime`: daemon entrypoints, configuration, and runtime wiring.
 - `msg-control-api`: future Axum control plane adapter.
@@ -22,6 +22,8 @@ The monolith is modular through crate boundaries:
 The core domain does not depend on HTTP, gRPC, filesystem layout, terminal rendering, or process management. Those concerns are adapters around domain ports. This keeps publish, consume, ACK/NACK, retry, DLQ, offset, and storage invariants testable without a running daemon.
 
 Milestone 2 keeps `msg-core` pure and places broker mutation state in `msg-broker`. The broker has no async runtime, shared mutex state, persistence, runtime workers, HTTP/gRPC adapters, or TypeScript-owned broker behavior. Retry and lease processing are explicit service calls driven by injected timestamps.
+
+Milestone 3 keeps durable storage independent from broker orchestration. `msg-storage` depends on `msg-core` domain types and stores validated `TopicName`, `PartitionId`, `Offset`, and `MessageEnvelope` values in local segment files. It persists message records only; durable ACK/NACK state, retry state, consumer cursors, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred. `msg-broker` behavior remains unchanged until a later milestone wires broker publish, consume, ACK/NACK, retry, cursor, and DLQ state to durable adapters.
 
 Planned dependency direction:
 

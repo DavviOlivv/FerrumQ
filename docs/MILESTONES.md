@@ -73,6 +73,26 @@ Deferred from Milestone 2:
 - Recovery after restart.
 - Corruption tests.
 
+Status: implemented in `crates/msg-storage` as an independent synchronous local segment-backed append-only message log.
+
+Implemented scope:
+
+- Message-record persistence only; broker runtime behavior remains the Milestone 2 in-memory implementation.
+- `LogConfig`, `PartitionLog`, `StoredMessageRecord`, and typed `StorageError` public API.
+- Per-topic-partition segment layout at `<root>/topics/<topic>/partitions/<partition-id>/<20-digit-base-offset>.log`.
+- Framed records with `u32_le record_length`, `u32_le crc32(payload)`, and compact JSON payloads containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`.
+- Zero-based monotonic offset assignment per partition.
+- Segment rolling by `max_segment_bytes` as a roll threshold, including support for a single oversized record in an empty segment.
+- Reopen recovery that validates segment ordering, topic, partition, offset continuity, JSON decoding, frame length, and checksums.
+- Final-segment trailing-record repair for truncated frames and checksum mismatches, with corruption errors for non-final or middle-of-segment corruption.
+- Integration tests using `tempfile` for append/read behavior, segment rolling, recovery, isolation, corruption handling, invalid config, and topic path validation.
+
+Deferred from Milestone 3:
+
+- Durable ACK/NACK state, retry state, consumer cursors, pending delivery state, and DLQ persistence.
+- Broker/storage wiring.
+- Indexes, retention, compaction, fsync policy tuning, APIs, runtime workers, and TypeScript behavior.
+
 ## Milestone 4: Delivery Semantics
 
 - At-least-once behavior.
@@ -81,6 +101,7 @@ Deferred from Milestone 2:
 - Max attempts.
 - Persistent DLQ.
 - Idempotency key support.
+- Durable broker delivery cursors and broker/storage wiring.
 
 ## Milestone 5: Control Plane API
 
