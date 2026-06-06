@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/msg-broker",
+    "crates/msg-control-api",
+    "crates/msg-core",
+    "crates/msg-observability",
+    "crates/msg-protocol",
+    "crates/msg-runtime",
+    "crates/msg-storage",
+    "crates/msg-test-harness",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0 OR MIT"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
