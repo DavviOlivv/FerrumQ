@@ -48,6 +48,22 @@ Deferred from Milestone 1:
 - Basic retry.
 - In-memory DLQ.
 
+Status: implemented in `crates/msg-broker` as a synchronous deterministic in-memory broker.
+
+Implemented scope:
+
+- `BrokerService` with owned in-memory state and public create topic, publish, consume, ACK, NACK, retry maintenance, and DLQ query APIs.
+- `BrokerConfig` with `RetryPolicy` and validated delivery lease duration.
+- Append-only in-memory vectors per topic partition with zero-based monotonic offsets.
+- Deterministic partition assignment: FNV-1a 64-bit for keyed messages, per-topic round-robin for unkeyed messages.
+- Independent consumer group state with pending deliveries, contiguous ACK cursor advancement, retry scheduling, lease expiry, and DLQ routing.
+- Deterministic delivery IDs derived from consumer group, topic, partition, offset, and attempt number.
+- Focused Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ metadata, offset uniqueness, no-redelivery, and externally observable delivery states.
+
+Deferred from Milestone 2:
+
+- Durable storage, append-only segment files, HTTP/gRPC adapters, runtime workers, background schedulers, TypeScript broker semantics, DLQ persistence, and broker daemon behavior.
+
 ## Milestone 3: Append-Only Log
 
 - Segmented log.

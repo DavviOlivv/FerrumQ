@@ -11,7 +11,7 @@ The monolith is modular through crate boundaries:
 - `msg-core`: pure domain types and invariants. Milestone 1 implements validated core newtypes, message envelopes, topics, partitions, consumer groups, subscriptions, delivery attempts, ACK/NACK commands, retry policy values, dead-letter reason values, typed domain errors, and serde support here.
 - `msg-protocol`: shared protocol DTOs and serialization boundaries.
 - `msg-storage`: storage ports and future implementations.
-- `msg-broker`: broker orchestration and delivery flow.
+- `msg-broker`: broker orchestration and delivery flow. Milestone 2 implements this as synchronous deterministic in-memory state with topic creation, publish, consume, ACK, NACK, retry maintenance, lease expiry, and in-memory DLQ.
 - `msg-runtime`: daemon entrypoints, configuration, and runtime wiring.
 - `msg-control-api`: future Axum control plane adapter.
 - `msg-observability`: tracing, metrics, and telemetry helpers.
@@ -21,7 +21,7 @@ The monolith is modular through crate boundaries:
 
 The core domain does not depend on HTTP, gRPC, filesystem layout, terminal rendering, or process management. Those concerns are adapters around domain ports. This keeps publish, consume, ACK/NACK, retry, DLQ, offset, and storage invariants testable without a running daemon.
 
-Milestone 1 keeps `msg-core` pure. It models domain values and construction-time invariants only; it does not implement publish/consume orchestration, runtime workers, persistence, retry scheduling, or DLQ storage.
+Milestone 2 keeps `msg-core` pure and places broker mutation state in `msg-broker`. The broker has no async runtime, shared mutex state, persistence, runtime workers, HTTP/gRPC adapters, or TypeScript-owned broker behavior. Retry and lease processing are explicit service calls driven by injected timestamps.
 
 Planned dependency direction:
 
@@ -39,7 +39,7 @@ TypeScript packages must not become an alternate broker implementation. They pre
 
 The control plane manages topics, partitions, consumer groups, DLQ inspection, health, readiness, and configuration visibility. The data plane handles publish, consume, ACK, and NACK. Separating the two avoids mixing admin operations with latency-sensitive message flow.
 
-Milestone 1 provides shared Rust domain values that later control-plane and data-plane adapters can use. The adapters themselves remain deferred.
+Milestone 2 provides shared Rust domain values and an in-memory broker service that later control-plane and data-plane adapters can call. The adapters themselves remain deferred.
 
 ## Future Distributed Evolution
 

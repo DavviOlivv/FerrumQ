@@ -1,3 +1,17 @@
+pub mod broker;
+pub mod commands;
+pub mod delivery;
+pub mod errors;
+pub(crate) mod memory;
+pub(crate) mod state;
+
+pub use broker::{BrokerConfig, BrokerService};
+pub use commands::{
+    AckCommand, ConsumeCommand, CreateTopicCommand, DlqQuery, NackCommand, PublishCommand,
+};
+pub use delivery::{ConsumedMessage, DeadLetterEntry, PublishedMessage, RetrySummary};
+pub use errors::{BrokerError, BrokerResult};
+
 /// Returns this crate's package name.
 pub fn crate_name() -> &'static str {
     "msg-broker"
