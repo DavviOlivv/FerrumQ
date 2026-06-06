@@ -10,6 +10,8 @@
 - Minimal TypeScript CLI/TUI/SDK/protocol packages.
 - Validation commands pass.
 
+Status: implemented.
+
 ## Milestone 1: Core Domain
 
 - Message envelope.
@@ -20,6 +22,21 @@
 - ACK/NACK models.
 - Domain errors.
 - Unit tests.
+
+Status: implemented in `crates/msg-core` as a pure Rust domain layer.
+
+Implemented scope:
+
+- Validated newtypes for message IDs, topic names, partition IDs, offsets, consumer group IDs, consumer IDs, subscription IDs, delivery IDs, idempotency keys, and partition keys.
+- CloudEvents-inspired `MessageEnvelope` with typed source, type, optional subject, content type, timestamp, headers, payload, optional partition key, and optional idempotency key.
+- Topic, partition, consumer group, consumer, subscription, delivery, ACK/NACK, retry policy, and dead-letter reason domain models.
+- Typed `DomainError`/`DomainResult<T>`.
+- Serde support for core value types and domain models.
+- Unit tests and focused property tests for core invariants.
+
+Deferred from Milestone 1:
+
+- Broker runtime, storage, HTTP/gRPC APIs, TypeScript broker semantics, workers, retry scheduling, and DLQ persistence.
 
 ## Milestone 2: In-Memory Broker
 

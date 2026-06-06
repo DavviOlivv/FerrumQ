@@ -1,22 +1,22 @@
 # Testing Strategy
 
-FerrumQ uses Harness Engineering from the first commit. Milestone 0 validation is intentionally small but establishes the commands future milestones must keep green.
+FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer.
 
 ## Unit Tests
 
-Every Rust crate and TypeScript package should keep focused unit tests for local behavior. Milestone 0 includes smoke tests for placeholder exports.
+Every Rust crate and TypeScript package should keep focused unit tests for local behavior. Milestone 1 includes `msg-core` unit tests for validated names and identifiers, topic partition configuration, message envelope construction, consumer groups, consumers, subscriptions, delivery attempts, ACK/NACK commands, retry policy validation, dead-letter reasons, delivery states, and serde round trips. Other crates and TypeScript packages still keep their Milestone 0 smoke coverage.
 
 ## Integration Tests
 
-Future integration tests will exercise crate boundaries, storage ports, broker orchestration, and runtime wiring without relying on external services.
+Future integration tests will exercise crate boundaries, storage ports, broker orchestration, and runtime wiring without relying on external services. Milestone 1 does not add integration tests because broker orchestration and storage ports remain deferred.
 
 ## End-to-End Tests
 
-Future E2E tests will launch the broker runtime and use CLI/SDK flows for create topic, publish, consume, ACK/NACK, retries, and DLQ inspection.
+Future E2E tests will launch the broker runtime and use CLI/SDK flows for create topic, publish, consume, ACK/NACK, retries, and DLQ inspection. Milestone 1 does not add E2E tests because no runtime daemon behavior is implemented.
 
 ## Property-Based Tests
 
-Use `proptest` for domain invariants such as offset ordering, partition selection, retry attempt bounds, cursor advancement, and envelope validation.
+Use `proptest` for domain invariants such as offset ordering, partition selection, retry attempt bounds, cursor advancement, and envelope validation. Milestone 1 adds focused property tests for topic-name validation and offset ordering.
 
 ## Concurrency Tests
 
@@ -54,4 +54,4 @@ The local and CI gates are:
 - `pnpm test`.
 - `pnpm build`.
 
-`cargo-deny` is recommended. In Milestone 0, missing global audit tooling is a non-breaking fallback.
+`cargo-deny` is recommended. Missing global audit tooling is a non-breaking fallback until the project standardizes required local tool installation.

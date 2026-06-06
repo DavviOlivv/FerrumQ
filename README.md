@@ -2,7 +2,9 @@
 
 FerrumQ is a milestone-driven messaging engine foundation. The core broker, domain, runtime, and storage semantics are owned by Rust. TypeScript owns the developer-facing CLI, TUI, SDK, and protocol package surfaces.
 
-Milestone 0 creates only the project skeleton, SDD documentation, architecture records, validation harness, and compile-tested placeholders. It does not implement broker runtime behavior, message delivery, persistence, HTTP/gRPC APIs, or TUI screens.
+Milestone 0 created the project skeleton, SDD documentation, architecture records, validation harness, and compile-tested placeholders. Milestone 1 adds the pure Rust `msg-core` domain layer: validated identifiers and names, message envelopes, topics and partitions, consumer groups and subscriptions, delivery attempts, ACK/NACK commands, retry policy values, DLQ reason values, typed domain errors, serde support, and focused unit/property tests.
+
+Milestone 1 still does not implement broker runtime behavior, publish/consume orchestration, durable storage, HTTP/gRPC APIs, retry scheduling workers, DLQ persistence, or TUI screens.
 
 ## Architecture Direction
 
@@ -34,4 +36,4 @@ pnpm test
 pnpm build
 ```
 
-`make audit` runs `cargo deny check` when `cargo-deny` is installed. In Milestone 0, missing global audit tooling is a non-breaking documented follow-up.
+`make audit` runs `cargo deny check` when `cargo-deny` is installed. Missing global audit tooling remains a non-breaking documented follow-up.
