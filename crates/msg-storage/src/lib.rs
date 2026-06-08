@@ -63,6 +63,10 @@ pub enum StorageError {
 }
 
 /// Synchronous segment-backed append-only log for one topic partition.
+///
+/// Offsets are zero-based, monotonic, and gapless for successful appends within
+/// a partition. Segment files are named by fixed-width 20-digit base offsets;
+/// unpadded `.log` file names are rejected during recovery.
 #[derive(Debug, Clone)]
 pub struct PartitionLog {
     config: LogConfig,
@@ -117,6 +121,11 @@ impl PartitionLog {
     ///
     /// The on-disk layout is:
     /// `<root>/topics/<topic>/partitions/<partition-id>/<20-digit-base-offset>.log`.
+    ///
+    /// Recovery scans segment files in numeric base-offset order. Only trailing
+    /// damage in the final segment is auto-repaired, by truncating to the start
+    /// of the damaged record. Corruption in a middle record or any non-final
+    /// segment returns a typed storage error.
     pub fn open(
         config: LogConfig,
         topic: &TopicName,
@@ -140,6 +149,13 @@ impl PartitionLog {
     }
 
     /// Appends one envelope and returns its assigned partition offset.
+    ///
+    /// The first successful append returns offset `0`. Successful appends are
+    /// monotonic and gapless per partition. If an append returns an error,
+    /// `next_offset` is not advanced; write or flush failures are rolled back to
+    /// the segment length observed before the append when the filesystem allows
+    /// truncation. The current write path calls [`Write::flush`]; explicit fsync
+    /// policy tuning is deferred.
     pub fn append(&mut self, envelope: MessageEnvelope) -> StorageResult<Offset> {
         let offset = self.next_offset;
         let next_offset = increment_offset(offset, &self.partition_dir)?;
@@ -160,20 +176,18 @@ impl PartitionLog {
         self.roll_if_needed(frame_size)?;
         let segment_index = self.ensure_active_segment()?;
         let segment_path = self.segments[segment_index].path.clone();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&segment_path)?;
-        file.write_all(&frame)?;
-        file.flush()?;
+        let rollback_len = self.segments[segment_index].size_bytes;
+        let new_segment_size =
+            rollback_len
+                .checked_add(frame_size)
+                .ok_or_else(|| StorageError::InvalidFormat {
+                    path: segment_path.clone(),
+                    reason: "segment size overflow".to_owned(),
+                })?;
+        append_frame_with_rollback(&segment_path, &frame, rollback_len)?;
 
         let segment = &mut self.segments[segment_index];
-        segment.size_bytes = segment.size_bytes.checked_add(frame_size).ok_or_else(|| {
-            StorageError::InvalidFormat {
-                path: segment.path.clone(),
-                reason: "segment size overflow".to_owned(),
-            }
-        })?;
+        segment.size_bytes = new_segment_size;
         segment.next_offset = next_offset;
         self.next_offset = next_offset;
 
@@ -181,6 +195,9 @@ impl PartitionLog {
     }
 
     /// Reads up to `limit` records starting at `offset`.
+    ///
+    /// Reads past the current end, reads from the exact next offset, and reads
+    /// with `limit == 0` return `Ok(Vec::new())`.
     pub fn read_from(
         &self,
         offset: Offset,
@@ -221,7 +238,7 @@ impl PartitionLog {
         Ok(records)
     }
 
-    /// Returns the offset that will be assigned to the next appended message.
+    /// Returns the offset that will be assigned to the next successful append.
     #[must_use]
     pub fn next_offset(&self) -> Offset {
         self.next_offset
@@ -410,6 +427,23 @@ fn encode_frame(payload: &[u8], path: &Path) -> StorageResult<Vec<u8>> {
     frame.extend_from_slice(&checksum.to_le_bytes());
     frame.extend_from_slice(payload);
     Ok(frame)
+}
+
+fn append_frame_with_rollback(path: &Path, frame: &[u8], rollback_len: u64) -> StorageResult<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    if let Err(error) = file.write_all(frame).and_then(|()| file.flush()) {
+        if let Err(rollback_error) = file.set_len(rollback_len) {
+            return Err(StorageError::CorruptSegment {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "append failed ({error}); rollback to byte {rollback_len} failed: {rollback_error}"
+                ),
+            });
+        }
+        return Err(StorageError::Io(error));
+    }
+
+    Ok(())
 }
 
 fn scan_segment(

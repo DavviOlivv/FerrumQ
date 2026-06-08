@@ -81,11 +81,14 @@ Implemented scope:
 - `LogConfig`, `PartitionLog`, `StoredMessageRecord`, and typed `StorageError` public API.
 - Per-topic-partition segment layout at `<root>/topics/<topic>/partitions/<partition-id>/<20-digit-base-offset>.log`.
 - Framed records with `u32_le record_length`, `u32_le crc32(payload)`, and compact JSON payloads containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`.
-- Zero-based monotonic offset assignment per partition.
+- Zero-based, monotonic, gapless offset assignment for successful appends per partition.
+- Read-past-end and read-from-next-offset behavior returning empty results.
+- Failed append behavior that preserves the in-memory next offset and rolls back write/flush failures to the previous segment length when possible.
+- Strict fixed 20-digit segment file naming with invalid unpadded names rejected.
 - Segment rolling by `max_segment_bytes` as a roll threshold, including support for a single oversized record in an empty segment.
 - Reopen recovery that validates segment ordering, topic, partition, offset continuity, JSON decoding, frame length, and checksums.
-- Final-segment trailing-record repair for truncated frames and checksum mismatches, with corruption errors for non-final or middle-of-segment corruption.
-- Integration tests using `tempfile` for append/read behavior, segment rolling, recovery, isolation, corruption handling, invalid config, and topic path validation.
+- Final-segment trailing-record repair for truncated frames, extra trailing bytes, checksum mismatches, invalid JSON, and metadata mismatches, with corruption errors for non-final or middle-of-segment corruption.
+- Integration tests using `tempfile` for append/read behavior, append failure, segment rolling, recovery, isolation, corruption handling, invalid config, and topic path validation.
 
 Deferred from Milestone 3:
 

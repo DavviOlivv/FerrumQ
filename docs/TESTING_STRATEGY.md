@@ -8,9 +8,9 @@ Every Rust crate and TypeScript package should keep focused unit tests for local
 
 ## Integration Tests
 
-Milestone 2 uses Rust integration-style tests against the public `msg-broker` API while keeping storage and runtime adapters deferred. Milestone 3 uses Rust integration tests against the public `msg-storage` API with `tempfile` roots for first append offset, monotonic offsets, bounded reads, future-offset reads, reopen recovery, topic and partition isolation, segment rolling, reads across segment boundaries, invalid configuration, and validated topic path safety.
+Milestone 2 uses Rust integration-style tests against the public `msg-broker` API while keeping storage and runtime adapters deferred. Milestone 3 uses Rust integration tests against the public `msg-storage` API with `tempfile` roots for first append offset, monotonic and gapless offsets, bounded reads, read-past-end behavior, failed append preservation, reopen recovery, topic and partition isolation, segment rolling, fixed-width segment naming, reads across segment boundaries, invalid configuration, and validated topic path safety.
 
-Storage recovery tests directly mutate local segment files to cover truncated final frames, checksum mismatch in the final trailing frame, and checksum mismatch in the middle of a segment. Milestone 3 persists message records only; durable ACK/NACK state, retry state, consumer cursors, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred. Future integration tests will exercise those areas without relying on external services.
+Storage recovery tests directly mutate local segment files to cover truncated final length, checksum header, and payload bytes; extra final trailing bytes; final checksum mismatch; final invalid JSON; final metadata mismatch; middle checksum mismatch; middle invalid JSON; empty segment handling; and out-of-sequence segment bases. Milestone 3 persists message records only; durable ACK/NACK state, retry state, consumer cursors, pending delivery state, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred. Future integration tests will exercise those areas without relying on external services.
 
 ## End-to-End Tests
 
@@ -30,7 +30,7 @@ Use `cargo-fuzz` for protocol parsing, storage record parsing, recovery, and cor
 
 ## Crash and Recovery Tests
 
-Durable storage milestones must include tests for restart, partial segment write, corrupted record, cursor restoration, and DLQ recovery. Milestone 3 covers storage-local reopen recovery, partial trailing-frame truncation, final trailing-frame checksum repair, and middle-of-segment checksum errors. Broker restart, cursor restoration, ACK/NACK state, retry state, and DLQ recovery remain future Milestone 4+ responsibilities.
+Durable storage milestones must include tests for restart, partial segment write, corrupted record, cursor restoration, and DLQ recovery. Milestone 3 covers storage-local reopen recovery, partial trailing-frame truncation, final trailing-frame checksum, JSON, and metadata repair, and middle-of-segment checksum and JSON errors. Broker restart, cursor restoration, ACK/NACK state, retry state, and DLQ recovery remain future Milestone 4+ responsibilities.
 
 ## Benchmarks
 

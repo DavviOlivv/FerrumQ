@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message log foundation in `msg-storage`.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`.
 
 ## 1. Product Vision
 
@@ -17,7 +17,7 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No TypeScript-owned broker semantics.
 - No production broker daemon behavior in Milestone 2.
 - No durable storage implementation in Milestone 2.
-- No durable broker delivery state, ACK/NACK cursor persistence, retry persistence, or DLQ persistence in Milestone 3.
+- No durable broker delivery state, ACK/NACK cursor persistence, retry persistence, pending delivery persistence, or DLQ persistence in Milestone 3.
 - No broker/storage wiring in Milestone 3.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
@@ -38,7 +38,7 @@ Messages use a CloudEvents-inspired envelope with stable metadata: ID, source, t
 
 ## 7. Topics, Partitions, Offsets
 
-Topics are logical streams. Partitions are ordered append sequences inside a topic. Offsets identify records within a partition. Milestone 2 stores each broker topic partition as an append-only in-memory vector. Milestone 3 adds a separate `msg-storage` partition log that persists message records to local segment files with the same zero-based monotonic offset model. Messages with a partition key use deterministic FNV-1a 64-bit hashing over key bytes modulo partition count. Messages without a key use a deterministic per-topic round-robin counter. Ordering is guaranteed only within the same topic partition, not globally.
+Topics are logical streams. Partitions are ordered append sequences inside a topic. Offsets identify records within a partition. Milestone 2 stores each broker topic partition as an append-only in-memory vector. Milestone 3 adds a separate `msg-storage` partition log that persists message records to local segment files with the same zero-based monotonic and gapless successful-append offset model. Messages with a partition key use deterministic FNV-1a 64-bit hashing over key bytes modulo partition count. Messages without a key use a deterministic per-topic round-robin counter. Ordering is guaranteed only within the same topic partition, not globally.
 
 ## 8. Consumer Groups and Cursors
 
@@ -76,9 +76,9 @@ Backpressure applies when memory, storage, partition depth, consumer lag, or ret
 
 The target storage model is an append-only log per topic partition. Milestone 2 uses append-only in-memory vectors local to `msg-broker`. Milestone 3 implements `msg-storage` as a synchronous local durable storage adapter/foundation with segment files at `<root>/topics/<topic>/partitions/<partition-id>/<20-digit-base-offset>.log`.
 
-Each Milestone 3 storage record is framed as `u32_le record_length`, `u32_le crc32(payload)`, and a compact deterministic JSON payload containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`. Recovery scans segment files in base-offset order, validates checksums, JSON, topic, partition, and offset continuity, and repairs only a corrupted or truncated trailing record in the final segment.
+Each Milestone 3 storage record is framed as `u32_le record_length`, `u32_le crc32(payload)`, and a compact deterministic JSON payload containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`. Segment names are fixed 20-digit base offsets. Recovery scans segment files in parsed base-offset order, validates checksums, JSON, topic, partition, and offset continuity, and repairs only trailing damage in the final segment by truncating to the start of the damaged record.
 
-Milestone 3 persists message records only. Durable ACK/NACK state, retry state, consumer cursors, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred.
+Milestone 3 persists message records only. Durable ACK/NACK state, retry state, consumer cursors, pending delivery state, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred.
 
 ## 17. Crash and Recovery Expectations
 

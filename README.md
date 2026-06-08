@@ -6,6 +6,8 @@ Milestone 0 created the project skeleton, SDD documentation, architecture record
 
 Milestone 2 adds `msg-broker` as a synchronous deterministic in-memory broker service. It supports topic creation, publish, consume, ACK, NACK, injected-time retry processing, lease expiry, and in-memory DLQ inspection. The broker has no async runtime, background worker, durable storage, HTTP/gRPC API, or TypeScript-owned broker semantics.
 
+Milestone 3 adds `msg-storage` as an independent synchronous local append-only log for durable message records. It uses framed JSON records, CRC32 checksums, fixed 20-digit segment names, zero-based gapless successful-append offsets, reopen recovery, and final-segment trailing-record repair. Broker delivery durability, ACK/NACK state, retry state, consumer cursors, pending delivery state, DLQ persistence, broker/storage wiring, APIs, retention, compaction, and fsync policy tuning remain deferred.
+
 ## Architecture Direction
 
 - Modular monolith first, with explicit crate and package boundaries.
@@ -36,6 +38,8 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 pnpm build
+cargo run -p msg-runtime --bin brokerd -- --version
+git diff --check
 ```
 
 `cargo nextest run --workspace` and `cargo deny check` require local optional tools. `make audit` runs `cargo deny check` when `cargo-deny` is installed. Missing global audit tooling remains a non-breaking documented follow-up.
