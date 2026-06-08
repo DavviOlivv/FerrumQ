@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen.
 
 ## 1. Product Vision
 
@@ -19,6 +19,7 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No durable storage implementation in Milestone 2.
 - No durable broker delivery state, ACK/NACK cursor persistence, retry persistence, pending delivery persistence, or DLQ persistence in Milestone 3.
 - No broker/storage wiring in Milestone 3.
+- No HTTP/gRPC API, CLI/TUI broker semantics, clustering, replication, consensus, or exactly-once behavior in Milestone 4.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
 
@@ -38,19 +39,19 @@ Messages use a CloudEvents-inspired envelope with stable metadata: ID, source, t
 
 ## 7. Topics, Partitions, Offsets
 
-Topics are logical streams. Partitions are ordered append sequences inside a topic. Offsets identify records within a partition. Milestone 2 stores each broker topic partition as an append-only in-memory vector. Milestone 3 adds a separate `msg-storage` partition log that persists message records to local segment files with the same zero-based monotonic and gapless successful-append offset model. Messages with a partition key use deterministic FNV-1a 64-bit hashing over key bytes modulo partition count. Messages without a key use a deterministic per-topic round-robin counter. Ordering is guaranteed only within the same topic partition, not globally.
+Topics are logical streams. Partitions are ordered append sequences inside a topic. Offsets identify records within a partition. Milestone 2 stores each broker topic partition as an append-only in-memory vector. Milestone 3 adds a separate `msg-storage` partition log that persists message records to local segment files with the same zero-based monotonic and gapless successful-append offset model. Milestone 4 wires `DurableBroker` publish and consume to `msg-storage` partition logs under `<root>/messages`. Messages with a partition key use deterministic FNV-1a 64-bit hashing over key bytes modulo partition count. Messages without a key use a deterministic per-topic round-robin counter. Ordering is guaranteed only within the same topic partition, not globally.
 
 ## 8. Consumer Groups and Cursors
 
-Consumer groups coordinate consumption and track cursors. Milestone 2 maintains independent in-memory group state per topic partition: contiguous ACK cursors, pending deliveries, scheduled retries, ACKed offsets, and DLQ offsets. Cursors advance only after contiguous ACKed offsets. A delivered but unacked message is not redelivered until a NACK schedules it and `retry_ready(now)` makes it available, or until lease expiry is processed by `retry_ready(now)`.
+Consumer groups coordinate consumption and track cursors. Milestone 2 maintains independent in-memory group state per topic partition: contiguous ACK cursors, pending deliveries, scheduled retries, ACKed offsets, and DLQ offsets. Cursors advance only after contiguous ACKed offsets. A delivered but unacked message is not redelivered until a NACK schedules it and `retry_ready(now)` makes it available, or until lease expiry is processed by `retry_ready(now)`. Milestone 4 persists `DurableBroker` delivery transitions in a local append-only JSONL state log so successful ACKs are not redelivered after reopen, NACK/retry/DLQ state survives reopen, and crash-recovered unACKed pending deliveries become immediately eligible for at-least-once redelivery with the next attempt number. Consumers must be idempotent.
 
 ## 9. Publish Flow
 
-Milestone 2 publish flow validates the topic exists, selects a partition deterministically, appends the envelope to the in-memory partition log, and returns topic, partition, offset, and message ID metadata. Milestone 3 proves durable message-record append/read/recovery in `msg-storage`, but `msg-broker` publish still uses the Milestone 2 in-memory path until broker/storage wiring is added.
+Milestone 2 publish flow validates the topic exists, selects a partition deterministically, appends the envelope to the in-memory partition log, and returns topic, partition, offset, and message ID metadata. Milestone 4 keeps `BrokerService` as the in-memory implementation and adds `DurableBroker`, whose publish path appends the envelope to `msg-storage::PartitionLog` before returning. A successfully published durable message is recoverable after broker reopen. A failed durable append returns an error and must not expose a phantom message.
 
 ## 10. Consume Flow
 
-Milestone 2 consume flow scans partitions in stable partition-id order and offsets in ascending order within each partition. A consumed message becomes pending for that consumer group with a deterministic delivery ID, attempt number, delivered-at timestamp, and lease expiry timestamp. Pending, retry-scheduled, ACKed, and DLQ messages are not returned by normal consume.
+Milestone 2 consume flow scans partitions in stable partition-id order and offsets in ascending order within each partition. A consumed message becomes pending for that consumer group with a deterministic delivery ID, attempt number, delivered-at timestamp, and lease expiry timestamp. Pending, retry-scheduled, ACKed, and DLQ messages are not returned by normal consume. Milestone 4 persists durable consume batches before exposing deliveries to callers.
 
 ## 11. ACK/NACK Flow
 
@@ -62,7 +63,7 @@ Retries use bounded attempts and optional backoff. Milestone 2 has no background
 
 ## 13. DLQ Policy
 
-A message exceeding max delivery attempts moves to the in-memory DLQ for that consumer group. DLQ entries include topic, partition, offset, message ID, original envelope, consumer group, reason, attempt count, and timestamp. DLQ persistence remains future work.
+A message exceeding max delivery attempts moves to the DLQ for that consumer group. DLQ entries include topic, partition, offset, message ID, original envelope, consumer group, reason, attempt count, and timestamp. `BrokerService` keeps DLQ entries in memory. `DurableBroker` persists DLQ transitions in its broker-state log and reconstructs DLQ entries from durable message records on reopen.
 
 ## 14. Idempotency and Deduplication
 
@@ -74,15 +75,15 @@ Backpressure applies when memory, storage, partition depth, consumer lag, or ret
 
 ## 16. Storage Model
 
-The target storage model is an append-only log per topic partition. Milestone 2 uses append-only in-memory vectors local to `msg-broker`. Milestone 3 implements `msg-storage` as a synchronous local durable storage adapter/foundation with segment files at `<root>/topics/<topic>/partitions/<partition-id>/<20-digit-base-offset>.log`.
+The target storage model is an append-only log per topic partition. Milestone 2 uses append-only in-memory vectors local to `msg-broker`. Milestone 3 implements `msg-storage` as a synchronous local durable storage adapter/foundation with segment files at `<root>/topics/<topic>/partitions/<partition-id>/<20-digit-base-offset>.log`. Milestone 4 uses that storage under `<root>/messages` for `DurableBroker` message records and writes broker delivery state under `<root>/broker-state/events.jsonl`.
 
 Each Milestone 3 storage record is framed as `u32_le record_length`, `u32_le crc32(payload)`, and a compact deterministic JSON payload containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`. Segment names are fixed 20-digit base offsets. Recovery scans segment files in parsed base-offset order, validates checksums, JSON, topic, partition, and offset continuity, and repairs only trailing damage in the final segment by truncating to the start of the damaged record.
 
-Milestone 3 persists message records only. Durable ACK/NACK state, retry state, consumer cursors, pending delivery state, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred.
+Message records and delivery state are separate durable concerns. `msg-storage` segment records are the source of message envelopes and offsets. The Milestone 4 broker-state JSONL log is the source of topic metadata and delivery transitions: consumed batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches. Indexes, retention, compaction, fsync policy tuning, APIs, clustering, replication, consensus, and TypeScript behavior remain deferred.
 
 ## 17. Crash and Recovery Expectations
 
-A message appended through `msg-storage` must be recoverable according to the local segment recovery rules. Once `msg-broker` is wired to storage in a later milestone, recovery must rebuild broker state from durable records without advancing unacked cursors incorrectly. ACK/NACK state, retry state, consumer cursors, and DLQ state remain in-memory and deferred after Milestone 3.
+A message appended through `msg-storage` must be recoverable according to the local segment recovery rules. In Milestone 4, a `DurableBroker` reopen replays topic metadata and delivery transitions from the broker-state JSONL log, reopens all message partition logs, reconstructs round-robin state from recovered unkeyed message count, preserves successful ACK/NACK/retry/DLQ transitions, and releases any remaining pending deliveries for immediate at-least-once redelivery. A final incomplete broker-state JSONL line may be truncated and ignored; malformed complete broker-state events are durable broker corruption errors. Durability is local filesystem durability, not replicated cluster durability.
 
 ## 18. Control Plane
 
@@ -102,7 +103,7 @@ Early milestones assume local development. Authentication, authorization, multi-
 
 ## 22. Testing Strategy Summary
 
-The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
+The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen tests for publish recovery, ACK no-redelivery, in-flight redelivery, NACK retry, attempt preservation, DLQ recovery, failed append visibility, and segment recovery integration. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
 
 ## 23. Milestone Roadmap
 

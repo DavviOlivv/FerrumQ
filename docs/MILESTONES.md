@@ -103,8 +103,28 @@ Deferred from Milestone 3:
 - Retry with backoff.
 - Max attempts.
 - Persistent DLQ.
-- Idempotency key support.
+- Idempotent consumer expectation.
 - Durable broker delivery cursors and broker/storage wiring.
+
+Status: implemented as a local durable delivery foundation in `crates/msg-broker`.
+
+Implemented scope:
+
+- Public `DurableBroker`, `DurableBrokerConfig`, `DurableBrokerError`, and `DurableBrokerResult` API alongside the unchanged in-memory `BrokerService`.
+- Local durable at-least-once delivery using `msg-storage::PartitionLog` for message records under `<root>/messages`.
+- Append-only compact JSONL broker-state log under `<root>/broker-state/events.jsonl` for topic metadata, consumed delivery batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches.
+- Durable publish recovery: successfully published messages are recoverable after broker reopen.
+- Durable ACK recovery: successfully ACKed messages are not redelivered after broker reopen.
+- Crash recovery for unACKed pending deliveries: remaining pending work is released for immediate at-least-once redelivery with the next attempt number.
+- Durable NACK, retry schedule, retry-ready, attempt-count, and DLQ recovery.
+- Shared deterministic broker helpers for FNV-1a keyed partitioning, round-robin partition selection, delivery ID generation, and timestamp addition.
+- Integration tests for publish/reopen, ACK/reopen, in-flight/reopen, NACK/reopen, retry attempts/reopen, DLQ/reopen, failed append visibility, and segment/recovery integration.
+
+Deferred from Milestone 4:
+
+- HTTP/gRPC API, CLI/TUI broker semantics, runtime daemon behavior, background retry workers, clustering, replication, consensus, exactly-once delivery, retention, compaction, indexes, and fsync policy tuning.
+- Replicated durability. Milestone 4 durability is local filesystem durability only.
+- Producer or consumer idempotency enforcement. Consumers must be idempotent under at-least-once delivery.
 
 ## Milestone 5: Control Plane API
 

@@ -1,34 +1,35 @@
 # Storage Format
 
-This document describes the storage design and the Milestone 3 on-disk message-record format implemented in `msg-storage`. The format is internal to FerrumQ while early milestones are still evolving; `format_version` exists so future migrations can be explicit rather than accidental.
+This document describes the storage design, the Milestone 3 on-disk message-record format implemented in `msg-storage`, and the Milestone 4 local durable broker-state log used by `DurableBroker`. The formats are internal to FerrumQ while early milestones are still evolving; `format_version` exists for message records so future migrations can be explicit rather than accidental.
 
 ## In-Memory First
 
-Early broker milestones may use in-memory storage to prove domain behavior and delivery semantics. Milestone 2 `msg-broker` behavior remains in-memory after Milestone 3. In-memory storage is not durable and must be documented as such wherever exposed.
+Early broker milestones may use in-memory storage to prove domain behavior and delivery semantics. `BrokerService` remains the in-memory broker and is not durable. Milestone 4 adds `DurableBroker` as a separate API for local filesystem durable at-least-once delivery.
 
 ## Append-Only Log Target
 
 Durable storage targets an append-only log per topic partition. Appends are the primary write path. Reads occur by offset. Milestone 3 implements append and read-from-offset for message records in `msg-storage`.
 
-Milestone 3 persists message records only. Durable ACK/NACK state, retry state, consumer cursors, pending delivery state, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred.
+Message records and delivery state are separate durable concerns. Milestone 4 stores durable message records in `msg-storage` logs under `<root>/messages` and stores topic/delivery transitions in a separate JSONL broker-state log under `<root>/broker-state/events.jsonl`. This provides local durable at-least-once delivery after broker reopen, not replicated cluster durability.
 
 ## Directory Layout
 
-Future durable storage should use a layout similar to:
+Milestone 4 durable broker storage uses:
 
 ```txt
 data/
-  topics/
-    <topic>/
-      partitions/
-        <partition-id>/
-          00000000000000000000.log
-          00000000000000000128.log
-          cursors/
-            <consumer-group>.cursor
+  messages/
+    topics/
+      <topic>/
+        partitions/
+          <partition-id>/
+            00000000000000000000.log
+            00000000000000000128.log
+  broker-state/
+    events.jsonl
 ```
 
-Milestone 3 implements only the `.log` files. Index files and cursor files are future work.
+Index files, cursor files, retention metadata, compaction metadata, and replicated consensus metadata are future work.
 
 ## Segment Files
 
@@ -74,9 +75,23 @@ Indexes are future work for faster offset lookup. Index rebuild should be possib
 
 Durability policy must be explicit. Milestone 3 calls `flush()` after writing each frame. Explicit fsync policy, group commit, and latency/durability tuning remain deferred. A future publish response can only claim durable success after the configured write and flush requirements are met.
 
+Milestone 4 broker-state events are written as compact JSON objects followed by `\n` and flushed before `DurableBroker` mutates in-memory delivery state or returns success for the corresponding operation. This is still local filesystem durability and does not imply replication or power-loss guarantees beyond the current flush policy.
+
+## Broker-State JSONL
+
+`DurableBroker` stores broker metadata and delivery transitions in `<root>/broker-state/events.jsonl`. Each complete line is one compact JSON object with a `type` field. Event types include:
+
+- `topic_created` with a serialized `Topic`.
+- `messages_consumed` with a batch of delivery records.
+- `message_acked` with delivery, consumer, topic, partition, offset, group, and timestamp metadata.
+- `message_nacked` with delivery metadata, attempt number, reason, timestamp, and either a `retry_scheduled` or `dead_lettered` outcome.
+- `retry_maintenance_applied` with expired pending delivery outcomes and retry entries made available.
+
+On reopen, `DurableBroker` replays the broker-state log, reopens message partition logs, reconstructs round-robin state from recovered unkeyed message count, and releases any still-pending delivery for immediate at-least-once redelivery while preserving its attempt count. Successfully ACKed messages are not redelivered after reopen. UnACKed messages may be redelivered after reopen, so consumers must be idempotent.
+
 ## Crash Recovery
 
-Recovery scans segment files in base-offset order, validates record boundaries, checksums, topic, partition, offset continuity, and JSON decoding, and truncates only trailing damage in the final segment. Repair always truncates to the start byte of the damaged record, preserving earlier valid records and discarding the damaged trailing bytes. Index rebuild and cursor restoration are future work.
+Recovery scans segment files in base-offset order, validates record boundaries, checksums, topic, partition, offset continuity, and JSON decoding, and truncates only trailing damage in the final segment. Repair always truncates to the start byte of the damaged record, preserving earlier valid records and discarding the damaged trailing bytes. `DurableBroker` may also truncate and ignore one final incomplete broker-state JSONL line without a trailing newline. Any malformed complete broker-state event is a typed durable broker corruption error.
 
 ## Corruption Handling
 

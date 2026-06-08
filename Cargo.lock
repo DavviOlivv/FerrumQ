@@ -194,6 +194,10 @@ name = "msg-broker"
 version = "0.1.0"
 dependencies = [
  "msg-core",
+ "msg-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

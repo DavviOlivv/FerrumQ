@@ -11,7 +11,7 @@ The monolith is modular through crate boundaries:
 - `msg-core`: pure domain types and invariants. Milestone 1 implements validated core newtypes, message envelopes, topics, partitions, consumer groups, subscriptions, delivery attempts, ACK/NACK commands, retry policy values, dead-letter reason values, typed domain errors, and serde support here.
 - `msg-protocol`: shared protocol DTOs and serialization boundaries.
 - `msg-storage`: local durable storage adapter/foundation. Milestone 3 implements a synchronous segment-backed append-only log per topic partition with framed JSON message records, CRC32 checksums, zero-based gapless offset assignment for successful appends, segment rolling, reopen recovery, and final-segment trailing-record repair.
-- `msg-broker`: broker orchestration and delivery flow. Milestone 2 implements this as synchronous deterministic in-memory state with topic creation, publish, consume, ACK, NACK, retry maintenance, lease expiry, and in-memory DLQ.
+- `msg-broker`: broker orchestration and delivery flow. Milestone 2 implements `BrokerService` as synchronous deterministic in-memory state with topic creation, publish, consume, ACK, NACK, retry maintenance, lease expiry, and in-memory DLQ. Milestone 4 adds `DurableBroker`, a synchronous local durable broker that uses `msg-storage` for message records and a JSONL broker-state log for topic metadata and delivery transitions.
 - `msg-runtime`: daemon entrypoints, configuration, and runtime wiring.
 - `msg-control-api`: future Axum control plane adapter.
 - `msg-observability`: tracing, metrics, and telemetry helpers.
@@ -24,6 +24,8 @@ The core domain does not depend on HTTP, gRPC, filesystem layout, terminal rende
 Milestone 2 keeps `msg-core` pure and places broker mutation state in `msg-broker`. The broker has no async runtime, shared mutex state, persistence, runtime workers, HTTP/gRPC adapters, or TypeScript-owned broker behavior. Retry and lease processing are explicit service calls driven by injected timestamps.
 
 Milestone 3 keeps durable storage independent from broker orchestration. `msg-storage` depends on `msg-core` domain types and stores validated `TopicName`, `PartitionId`, `Offset`, and `MessageEnvelope` values in local segment files with fixed 20-digit segment names and final-segment-only repair. It persists message records only; durable ACK/NACK state, retry state, consumer cursors, pending delivery state, DLQ persistence, broker/storage wiring, indexes, retention, compaction, fsync policy tuning, APIs, and TypeScript behavior are deferred. `msg-broker` behavior remains unchanged until a later milestone wires broker publish, consume, ACK/NACK, retry, cursor, and DLQ state to durable adapters.
+
+Milestone 4 keeps `BrokerService` unchanged and adds `DurableBroker` as a separate public API. Durable message records live under `<root>/messages` through `msg-storage::PartitionLog`; durable topic and delivery state lives under `<root>/broker-state/events.jsonl` as append-only compact JSONL events. Successfully published messages are recoverable after reopen, successfully ACKed messages are not redelivered after reopen, and unACKed in-flight deliveries may be redelivered after reopen. This is local filesystem durability only, not replicated cluster durability. There is still no HTTP/gRPC API, CLI/TUI broker behavior, clustering, replication, consensus, or exactly-once delivery.
 
 Planned dependency direction:
 

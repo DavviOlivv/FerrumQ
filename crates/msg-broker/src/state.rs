@@ -6,6 +6,7 @@ use msg_core::{
 };
 
 use crate::delivery::DeadLetterEntry;
+use crate::helpers::advance_round_robin_partition;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StoredTopic {
@@ -47,11 +48,13 @@ impl StoredTopic {
         self.topic.partition_count()
     }
 
-    pub(crate) fn select_round_robin_partition(&mut self) -> PartitionId {
-        let partition_id = PartitionId::new(self.next_round_robin_partition);
+    pub(crate) fn next_round_robin_partition(&self) -> u32 {
+        self.next_round_robin_partition
+    }
+
+    pub(crate) fn advance_round_robin_partition(&mut self) {
         self.next_round_robin_partition =
-            (self.next_round_robin_partition + 1) % self.partition_count();
-        partition_id
+            advance_round_robin_partition(self.next_round_robin_partition, self.partition_count());
     }
 }
 

@@ -1,7 +1,9 @@
 pub mod broker;
 pub mod commands;
 pub mod delivery;
+pub mod durable;
 pub mod errors;
+pub(crate) mod helpers;
 pub(crate) mod memory;
 pub(crate) mod state;
 
@@ -10,6 +12,7 @@ pub use commands::{
     AckCommand, ConsumeCommand, CreateTopicCommand, DlqQuery, NackCommand, PublishCommand,
 };
 pub use delivery::{ConsumedMessage, DeadLetterEntry, PublishedMessage, RetrySummary};
+pub use durable::{DurableBroker, DurableBrokerConfig, DurableBrokerError, DurableBrokerResult};
 pub use errors::{BrokerError, BrokerResult};
 
 /// Returns this crate's package name.

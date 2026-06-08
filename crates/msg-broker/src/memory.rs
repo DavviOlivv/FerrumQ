@@ -1,12 +1,13 @@
 use msg_core::{
     ConsumerGroupId, DeadLetterReason, DeliveryId, MessageEnvelope, MessageTimestamp, Offset,
-    PartitionId, RetryPolicy, Topic, TopicName,
+    RetryPolicy, Topic, TopicName,
 };
 
 use crate::{
     commands::{AckCommand, ConsumeCommand, CreateTopicCommand, DlqQuery, NackCommand},
     delivery::{ConsumedMessage, DeadLetterEntry, PublishedMessage, RetrySummary},
     errors::{BrokerError, BrokerResult},
+    helpers::{add_millis, deterministic_delivery_id, select_partition},
     state::{
         BrokerState, GroupPartitionState, MessageRef, PendingDelivery, RetryEntry, StoredTopic,
     },
@@ -47,12 +48,16 @@ impl InMemoryBrokerState {
                     topic: topic.clone(),
                 })?;
 
+        let should_advance_round_robin = envelope.partition_key().is_none();
         let partition_id = select_partition(stored_topic, &envelope);
         let message_id = envelope.id().clone();
         let offset = stored_topic
             .partition_log_mut(partition_id)
             .expect("topic partition logs are created from Topic partition ids")
             .append(envelope);
+        if should_advance_round_robin {
+            stored_topic.advance_round_robin_partition();
+        }
 
         Ok(PublishedMessage::new(
             topic,
@@ -416,66 +421,4 @@ impl InMemoryBrokerState {
             .or_default()
             .partition_state_mut(&message_ref.topic, message_ref.partition_id)
     }
-}
-
-fn select_partition(stored_topic: &mut StoredTopic, envelope: &MessageEnvelope) -> PartitionId {
-    if let Some(partition_key) = envelope.partition_key() {
-        return PartitionId::new(
-            (fnv1a_64(partition_key.as_str().as_bytes())
-                % u64::from(stored_topic.partition_count())) as u32,
-        );
-    }
-
-    stored_topic.select_round_robin_partition()
-}
-
-/// Deterministic FNV-1a 64-bit hash for keyed partition selection.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
-    })
-}
-
-fn deterministic_delivery_id(
-    consumer_group_id: &ConsumerGroupId,
-    topic: &TopicName,
-    partition_id: PartitionId,
-    offset: Offset,
-    attempt_number: u32,
-) -> BrokerResult<DeliveryId> {
-    let input = format!(
-        "{}:{}:{}:{}:{}",
-        consumer_group_id,
-        topic,
-        partition_id.value(),
-        offset.value(),
-        attempt_number
-    );
-
-    DeliveryId::new(format!(
-        "delivery:{:016x}:{}:{}:{}",
-        fnv1a_64(input.as_bytes()),
-        partition_id.value(),
-        offset.value(),
-        attempt_number
-    ))
-    .map_err(BrokerError::from)
-}
-
-fn add_millis(
-    timestamp: MessageTimestamp,
-    millis: u64,
-    field: &'static str,
-) -> BrokerResult<MessageTimestamp> {
-    timestamp
-        .as_unix_millis()
-        .checked_add(millis)
-        .map(MessageTimestamp::from_unix_millis)
-        .ok_or(BrokerError::InvalidConfig {
-            field,
-            reason: "timestamp overflow",
-        })
 }

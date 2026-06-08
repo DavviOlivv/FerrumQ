@@ -10,4 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 msg-core = { path = "../msg-core" }
+msg-storage = { path = "../msg-storage" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
