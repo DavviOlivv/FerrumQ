@@ -118,7 +118,9 @@ Implemented scope:
 - Crash recovery for unACKed pending deliveries: remaining pending work is released for immediate at-least-once redelivery with the next attempt number.
 - Durable NACK, retry schedule, retry-ready, attempt-count, and DLQ recovery.
 - Shared deterministic broker helpers for FNV-1a keyed partitioning, round-robin partition selection, delivery ID generation, and timestamp addition.
-- Integration tests for publish/reopen, ACK/reopen, in-flight/reopen, NACK/reopen, retry attempts/reopen, DLQ/reopen, failed append visibility, and segment/recovery integration.
+- Integration tests for publish/reopen, ACK/reopen, in-flight/reopen, NACK/reopen, retry attempts/reopen, DLQ/reopen, duplicate/stale delivery operations, partition/offset recovery, broker-state corruption, failed append visibility, and segment/recovery integration.
+- Crate-local persistence-boundary tests for consumed-delivery, ACK, NACK/retry, retry maintenance, and DLQ state-log append failures.
+- Broker-state format documentation in [BROKER_STATE_FORMAT.md](BROKER_STATE_FORMAT.md).
 
 Deferred from Milestone 4:
 

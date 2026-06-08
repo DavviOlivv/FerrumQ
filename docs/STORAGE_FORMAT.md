@@ -79,7 +79,7 @@ Milestone 4 broker-state events are written as compact JSON objects followed by 
 
 ## Broker-State JSONL
 
-`DurableBroker` stores broker metadata and delivery transitions in `<root>/broker-state/events.jsonl`. Each complete line is one compact JSON object with a `type` field. Event types include:
+`DurableBroker` stores broker metadata and delivery transitions in `<root>/broker-state/events.jsonl`. The dedicated broker-state contract lives in [BROKER_STATE_FORMAT.md](BROKER_STATE_FORMAT.md). Each complete line is one compact JSON object with a `type` field. Event types include:
 
 - `topic_created` with a serialized `Topic`.
 - `messages_consumed` with a batch of delivery records.

@@ -88,6 +88,26 @@ pub enum DurableBrokerError {
 /// `<root>/messages`. Topic metadata and delivery state transitions are
 /// persisted in an append-only JSONL state log under
 /// `<root>/broker-state/events.jsonl`.
+///
+/// The durable broker provides local filesystem at-least-once semantics:
+///
+/// - [`DurableBroker::publish`] returns success only after the message record
+///   has been appended to the message log.
+/// - [`DurableBroker::consume`] returns deliveries only after their delivery
+///   state event has been appended and flushed.
+/// - [`DurableBroker::ack`], [`DurableBroker::nack`], and
+///   [`DurableBroker::retry_ready`] append and flush their state events before
+///   mutating in-memory delivery state.
+/// - Reopen recovery releases any unACKed in-flight deliveries so they can be
+///   redelivered with the next deterministic attempt number.
+/// - Unknown, duplicate, stale, ACK-after-NACK, and NACK-after-ACK delivery IDs
+///   return [`BrokerError::DeliveryNotFound`].
+/// - Complete malformed broker-state log lines are fatal
+///   [`DurableBrokerError::StateCorruption`] errors. A final incomplete state
+///   line without a trailing newline is truncated and ignored during recovery.
+///
+/// This is not exactly-once delivery, deduplication enforcement, replication,
+/// compaction, or an fsync-tuned storage policy. Consumers must be idempotent.
 #[derive(Debug)]
 pub struct DurableBroker {
     config: DurableBrokerConfig,
@@ -113,6 +133,8 @@ struct DurableTopic {
 #[derive(Debug)]
 struct StateLog {
     file: File,
+    #[cfg(test)]
+    fail_next_append: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +234,14 @@ enum DeliveryOutcome {
 }
 
 impl DurableBroker {
+    /// Opens or creates a durable broker rooted at `config.root_dir`.
+    ///
+    /// Recovery replays `<root>/broker-state/events.jsonl`, opens the message
+    /// logs under `<root>/messages`, reconstructs round-robin partition
+    /// selection, and releases recovered pending deliveries for at-least-once
+    /// redelivery. Complete malformed state lines fail open with
+    /// [`DurableBrokerError::StateCorruption`]; one final incomplete line is
+    /// truncated and ignored.
     pub fn open(config: DurableBrokerConfig) -> DurableBrokerResult<Self> {
         fs::create_dir_all(&config.root_dir)?;
 
@@ -237,6 +267,11 @@ impl DurableBroker {
         Ok(broker)
     }
 
+    /// Creates topic metadata and opens its durable partition logs.
+    ///
+    /// The topic-created event is appended and flushed to broker state before
+    /// the topic becomes visible in memory. Recreating a recovered topic returns
+    /// [`BrokerError::TopicAlreadyExists`].
     pub fn create_topic(&mut self, command: CreateTopicCommand) -> DurableBrokerResult<Topic> {
         let topic = Topic::new(command.name().clone(), command.config());
         if self.topics.contains_key(topic.name()) {
@@ -255,6 +290,11 @@ impl DurableBroker {
         Ok(topic)
     }
 
+    /// Publishes one envelope to a topic partition.
+    ///
+    /// Success means the message record append completed in `msg-storage`. If
+    /// append fails, no durable broker metadata is advanced and no phantom
+    /// message is exposed by recovery.
     pub fn publish(&mut self, command: PublishCommand) -> DurableBrokerResult<PublishedMessage> {
         let (topic_name, envelope) = command.into_parts();
         let durable_topic =
@@ -284,6 +324,13 @@ impl DurableBroker {
         ))
     }
 
+    /// Consumes up to `max_messages` available messages for a consumer group.
+    ///
+    /// Selected deliveries are appended and flushed to broker state before they
+    /// are marked pending in memory or returned to the caller. Pending,
+    /// retry-scheduled, ACKed, and DLQ offsets are not delivered. Recovered
+    /// unACKed pending deliveries are made available again and redelivered with
+    /// incremented attempts.
     pub fn consume(
         &mut self,
         command: ConsumeCommand,
@@ -321,6 +368,12 @@ impl DurableBroker {
             .collect())
     }
 
+    /// ACKs a pending delivery.
+    ///
+    /// The ACK state event is appended and flushed before pending state is
+    /// removed and the partition cursor is advanced. Unknown, duplicate, stale,
+    /// ACK-after-NACK, and ACK-after-DLQ delivery IDs return
+    /// [`BrokerError::DeliveryNotFound`].
     pub fn ack(&mut self, command: AckCommand) -> DurableBrokerResult<()> {
         let pending = self
             .pending_for_command(command.delivery_id(), command.consumer_id())?
@@ -341,6 +394,13 @@ impl DurableBroker {
         Ok(())
     }
 
+    /// NACKs a pending delivery and schedules retry or DLQ routing.
+    ///
+    /// The NACK outcome event is appended and flushed before pending state is
+    /// removed. If the next attempt is within the retry policy the message is
+    /// retry-scheduled; otherwise it is dead-lettered. Unknown, duplicate,
+    /// stale, NACK-after-ACK, and NACK-after-DLQ delivery IDs return
+    /// [`BrokerError::DeliveryNotFound`].
     pub fn nack(&mut self, command: NackCommand) -> DurableBrokerResult<()> {
         let pending = self
             .pending_for_command(command.delivery_id(), command.consumer_id())?
@@ -380,6 +440,11 @@ impl DurableBroker {
         Ok(())
     }
 
+    /// Applies deterministic retry maintenance at the injected timestamp.
+    ///
+    /// The maintenance event records lease-expiry outcomes and ready retry
+    /// offsets, then is appended and flushed before in-memory retry, pending,
+    /// or DLQ state is mutated.
     pub fn retry_ready(&mut self, now: MessageTimestamp) -> DurableBrokerResult<RetrySummary> {
         let expired_pending: Vec<_> = self
             .state
@@ -472,6 +537,10 @@ impl DurableBroker {
         ))
     }
 
+    /// Lists recovered and in-memory dead-letter entries matching `query`.
+    ///
+    /// DLQ entries are durable broker-state outcomes and are not delivered
+    /// again by normal consume after reopen.
     pub fn list_dlq(&self, query: DlqQuery) -> DurableBrokerResult<Vec<DeadLetterEntry>> {
         if let Some(topic) = query.topic()
             && !self.topics.contains_key(topic)
@@ -1097,6 +1166,11 @@ impl DurableBroker {
             max_segment_bytes: self.config.max_segment_bytes,
         }
     }
+
+    #[cfg(test)]
+    fn fail_next_state_log_append(&mut self) {
+        self.state_log.fail_next_append();
+    }
 }
 
 impl DurableTopic {
@@ -1148,15 +1222,30 @@ impl DurableTopic {
 impl StateLog {
     fn open(path: &Path) -> DurableBrokerResult<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            #[cfg(test)]
+            fail_next_append: false,
+        })
     }
 
     fn append(&mut self, event: &BrokerStateEvent) -> DurableBrokerResult<()> {
+        #[cfg(test)]
+        if self.fail_next_append {
+            self.fail_next_append = false;
+            return Err(std::io::Error::other("injected broker-state append failure").into());
+        }
+
         let bytes = serde_json::to_vec(event)?;
         self.file.write_all(&bytes)?;
         self.file.write_all(b"\n")?;
         self.file.flush()?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn fail_next_append(&mut self) {
+        self.fail_next_append = true;
     }
 }
 
@@ -1223,5 +1312,240 @@ fn recover_state_events(path: &Path) -> DurableBrokerResult<Vec<BrokerStateEvent
 fn corruption(reason: impl Into<String>) -> DurableBrokerError {
     DurableBrokerError::Corruption {
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use msg_core::{ContentType, EventSource, EventType, MessageId, MessagePayload, TopicConfig};
+
+    use super::*;
+
+    const MAX_SEGMENT_BYTES: u64 = 1024 * 1024;
+
+    fn timestamp(value: u64) -> MessageTimestamp {
+        MessageTimestamp::from_unix_millis(value)
+    }
+
+    fn topic_name() -> TopicName {
+        TopicName::new("orders").unwrap()
+    }
+
+    fn group_id() -> ConsumerGroupId {
+        ConsumerGroupId::new("group.1").unwrap()
+    }
+
+    fn consumer_id() -> ConsumerId {
+        ConsumerId::new("consumer-1").unwrap()
+    }
+
+    fn broker_config(max_attempts: u32, backoff_millis: Option<u64>) -> BrokerConfig {
+        BrokerConfig::new(
+            RetryPolicy::new(max_attempts, backoff_millis).unwrap(),
+            1_000,
+        )
+        .unwrap()
+    }
+
+    fn durable_config(
+        root: &TempDir,
+        max_attempts: u32,
+        backoff_millis: Option<u64>,
+    ) -> DurableBrokerConfig {
+        DurableBrokerConfig::new(
+            root.path(),
+            broker_config(max_attempts, backoff_millis),
+            MAX_SEGMENT_BYTES,
+        )
+    }
+
+    fn open_broker(
+        root: &TempDir,
+        max_attempts: u32,
+        backoff_millis: Option<u64>,
+    ) -> DurableBroker {
+        DurableBroker::open(durable_config(root, max_attempts, backoff_millis)).unwrap()
+    }
+
+    fn envelope(id: impl AsRef<str>) -> MessageEnvelope {
+        MessageEnvelope::builder(
+            MessageId::new(id.as_ref()).unwrap(),
+            EventSource::new("/tests").unwrap(),
+            EventType::new("order.created").unwrap(),
+            ContentType::new("application/json").unwrap(),
+            timestamp(1),
+            MessagePayload::from_bytes(br#"{"ok":true}"#.to_vec()),
+        )
+        .build()
+    }
+
+    fn create_topic(broker: &mut DurableBroker) {
+        broker
+            .create_topic(CreateTopicCommand::new(
+                topic_name(),
+                TopicConfig::new(1).unwrap(),
+            ))
+            .unwrap();
+    }
+
+    fn publish(broker: &mut DurableBroker, id: impl AsRef<str>) {
+        broker
+            .publish(PublishCommand::new(topic_name(), envelope(id)))
+            .unwrap();
+    }
+
+    fn consume(broker: &mut DurableBroker, at: u64) -> Vec<ConsumedMessage> {
+        broker
+            .consume(ConsumeCommand::new(
+                topic_name(),
+                group_id(),
+                consumer_id(),
+                10,
+                timestamp(at),
+            ))
+            .unwrap()
+    }
+
+    fn assert_injected_io_error(error: DurableBrokerError) {
+        assert!(matches!(error, DurableBrokerError::Io(_)));
+    }
+
+    #[test]
+    fn consume_state_log_append_failure_does_not_mark_deliveries_pending() {
+        let root = TempDir::new().unwrap();
+        let mut broker = open_broker(&root, 3, Some(100));
+        create_topic(&mut broker);
+        publish(&mut broker, "message-1");
+
+        broker.fail_next_state_log_append();
+        let error = broker
+            .consume(ConsumeCommand::new(
+                topic_name(),
+                group_id(),
+                consumer_id(),
+                10,
+                timestamp(10),
+            ))
+            .unwrap_err();
+        assert_injected_io_error(error);
+
+        let consumed = consume(&mut broker, 11);
+        assert_eq!(consumed.len(), 1);
+        assert_eq!(consumed[0].attempt_number(), 1);
+        assert_eq!(consumed[0].envelope().id().as_str(), "message-1");
+    }
+
+    #[test]
+    fn ack_state_log_append_failure_leaves_message_pending_and_not_recovered_as_acked() {
+        let root = TempDir::new().unwrap();
+        let delivery_id = {
+            let mut broker = open_broker(&root, 3, Some(100));
+            create_topic(&mut broker);
+            publish(&mut broker, "message-1");
+            let consumed = consume(&mut broker, 10);
+
+            broker.fail_next_state_log_append();
+            let error = broker
+                .ack(AckCommand::new(
+                    consumed[0].delivery_id().clone(),
+                    consumer_id(),
+                    timestamp(11),
+                ))
+                .unwrap_err();
+            assert_injected_io_error(error);
+            assert!(consume(&mut broker, 12).is_empty());
+
+            consumed[0].delivery_id().clone()
+        };
+
+        let mut reopened = open_broker(&root, 3, Some(100));
+        let redelivered = consume(&mut reopened, 20);
+        assert_eq!(redelivered.len(), 1);
+        assert_eq!(redelivered[0].attempt_number(), 2);
+        assert_ne!(redelivered[0].delivery_id(), &delivery_id);
+    }
+
+    #[test]
+    fn nack_retry_state_log_append_failure_leaves_pending_delivery_intact() {
+        let root = TempDir::new().unwrap();
+        {
+            let mut broker = open_broker(&root, 3, Some(100));
+            create_topic(&mut broker);
+            publish(&mut broker, "message-1");
+            let consumed = consume(&mut broker, 10);
+
+            broker.fail_next_state_log_append();
+            let error = broker
+                .nack(NackCommand::with_reason(
+                    consumed[0].delivery_id().clone(),
+                    consumer_id(),
+                    "transient",
+                    timestamp(11),
+                ))
+                .unwrap_err();
+            assert_injected_io_error(error);
+            assert!(consume(&mut broker, 12).is_empty());
+        }
+
+        let mut reopened = open_broker(&root, 3, Some(100));
+        let redelivered = consume(&mut reopened, 20);
+        assert_eq!(redelivered.len(), 1);
+        assert_eq!(redelivered[0].attempt_number(), 2);
+        assert_eq!(redelivered[0].envelope().id().as_str(), "message-1");
+    }
+
+    #[test]
+    fn retry_maintenance_state_log_append_failure_leaves_pending_delivery_intact() {
+        let root = TempDir::new().unwrap();
+        {
+            let mut broker = open_broker(&root, 3, Some(100));
+            create_topic(&mut broker);
+            publish(&mut broker, "message-1");
+            let consumed = consume(&mut broker, 10);
+
+            broker.fail_next_state_log_append();
+            let error = broker.retry_ready(timestamp(1_010)).unwrap_err();
+            assert_injected_io_error(error);
+            assert!(consume(&mut broker, 1_011).is_empty());
+            assert_eq!(consumed[0].attempt_number(), 1);
+        }
+
+        let mut reopened = open_broker(&root, 3, Some(100));
+        let redelivered = consume(&mut reopened, 20);
+        assert_eq!(redelivered.len(), 1);
+        assert_eq!(redelivered[0].attempt_number(), 2);
+    }
+
+    #[test]
+    fn dlq_transition_state_log_append_failure_does_not_drop_message() {
+        let root = TempDir::new().unwrap();
+        {
+            let mut broker = open_broker(&root, 1, None);
+            create_topic(&mut broker);
+            publish(&mut broker, "message-1");
+            let consumed = consume(&mut broker, 10);
+
+            broker.fail_next_state_log_append();
+            let error = broker
+                .nack(NackCommand::with_reason(
+                    consumed[0].delivery_id().clone(),
+                    consumer_id(),
+                    "poison",
+                    timestamp(11),
+                ))
+                .unwrap_err();
+            assert_injected_io_error(error);
+            assert!(broker.list_dlq(DlqQuery::all()).unwrap().is_empty());
+            assert!(consume(&mut broker, 12).is_empty());
+        }
+
+        let mut reopened = open_broker(&root, 1, None);
+        let redelivered = consume(&mut reopened, 20);
+        assert_eq!(redelivered.len(), 1);
+        assert_eq!(redelivered[0].attempt_number(), 2);
+        assert_eq!(redelivered[0].envelope().id().as_str(), "message-1");
+        assert!(reopened.list_dlq(DlqQuery::all()).unwrap().is_empty());
     }
 }

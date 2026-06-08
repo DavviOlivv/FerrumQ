@@ -20,11 +20,11 @@ Milestone 4 adds `DurableBroker` as a separate synchronous broker API in `msg-br
 <root>/broker-state/events.jsonl
 ```
 
-The broker-state log records topic creation, consumed delivery batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches. Each event is flushed before `DurableBroker` mutates in-memory delivery state or returns success for that operation.
+The broker-state log records topic creation, consumed delivery batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches. Each event is flushed before `DurableBroker` mutates in-memory delivery state or returns success for that operation. The concrete event schema and recovery contract are documented in [../BROKER_STATE_FORMAT.md](../BROKER_STATE_FORMAT.md).
 
-Recovery replays the broker-state log, reopens all message partition logs, reconstructs round-robin state from recovered unkeyed message count, and rebuilds consumer group delivery state. Successfully published messages are recoverable after broker reopen. Successfully ACKed messages are not redelivered after broker reopen. Remaining pending deliveries are treated as crash-recovered unACKed work: they are removed from pending state, their attempt count is retained, and they are immediately eligible for at-least-once redelivery with a new deterministic delivery ID.
+Recovery replays the broker-state log, reopens all message partition logs, reconstructs round-robin state from recovered unkeyed message count, and rebuilds consumer group delivery state. Successfully published messages are recoverable after broker reopen. Successfully ACKed messages are not redelivered after broker reopen. Remaining pending deliveries are treated as crash-recovered unACKed work: they are removed from pending state, their attempt count is retained, and they are immediately eligible for at-least-once redelivery with a new deterministic delivery ID. Unknown, duplicate, stale, ACK-after-NACK, and NACK-after-ACK delivery IDs return `BrokerError::DeliveryNotFound`.
 
-A final incomplete broker-state JSONL line without a trailing newline may be truncated and ignored. Any malformed complete broker-state event is a typed durable broker corruption error. Message-log corruption follows the `msg-storage` contract.
+A final incomplete broker-state JSONL line without a trailing newline may be truncated and ignored. Any malformed complete broker-state event is a typed `StateCorruption` error. Complete but inconsistent state events, such as duplicate recovered topic metadata, are typed durable broker `Corruption` errors. Message-log corruption follows the `msg-storage` contract and is surfaced through durable broker storage errors.
 
 ## Rationale
 

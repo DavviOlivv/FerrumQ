@@ -55,7 +55,7 @@ Milestone 2 consume flow scans partitions in stable partition-id order and offse
 
 ## 11. ACK/NACK Flow
 
-ACK confirms successful processing and can advance a group cursor only through contiguous ACKed offsets. NACK records failure and schedules retry using the configured backoff, or routes to DLQ when the next delivery would exceed max attempts. Wrong-consumer ACK/NACK attempts fail explicitly. Unknown, stale, already ACKed, retry-scheduled, NACKed, or DLQ delivery IDs fail as not found.
+ACK confirms successful processing and can advance a group cursor only through contiguous ACKed offsets. NACK records failure and schedules retry using the configured backoff, or routes to DLQ when the next delivery would exceed max attempts. `DurableBroker` appends and flushes ACK/NACK outcome events before mutating pending, retry, cursor, or DLQ state. Wrong-consumer ACK/NACK attempts fail explicitly. Unknown, stale, already ACKed, retry-scheduled, NACKed, or DLQ delivery IDs fail as not found.
 
 ## 12. Retry Policy
 
@@ -79,7 +79,7 @@ The target storage model is an append-only log per topic partition. Milestone 2 
 
 Each Milestone 3 storage record is framed as `u32_le record_length`, `u32_le crc32(payload)`, and a compact deterministic JSON payload containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`. Segment names are fixed 20-digit base offsets. Recovery scans segment files in parsed base-offset order, validates checksums, JSON, topic, partition, and offset continuity, and repairs only trailing damage in the final segment by truncating to the start of the damaged record.
 
-Message records and delivery state are separate durable concerns. `msg-storage` segment records are the source of message envelopes and offsets. The Milestone 4 broker-state JSONL log is the source of topic metadata and delivery transitions: consumed batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches. Indexes, retention, compaction, fsync policy tuning, APIs, clustering, replication, consensus, and TypeScript behavior remain deferred.
+Message records and delivery state are separate durable concerns. `msg-storage` segment records are the source of message envelopes and offsets. The Milestone 4 broker-state JSONL log is the source of topic metadata and delivery transitions: consumed batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches. The executable broker-state contract is documented in [BROKER_STATE_FORMAT.md](BROKER_STATE_FORMAT.md). Indexes, retention, compaction, fsync policy tuning, APIs, clustering, replication, consensus, and TypeScript behavior remain deferred.
 
 ## 17. Crash and Recovery Expectations
 
@@ -103,7 +103,7 @@ Early milestones assume local development. Authentication, authorization, multi-
 
 ## 22. Testing Strategy Summary
 
-The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen tests for publish recovery, ACK no-redelivery, in-flight redelivery, NACK retry, attempt preservation, DLQ recovery, failed append visibility, and segment recovery integration. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
+The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
 
 ## 23. Milestone Roadmap
 
