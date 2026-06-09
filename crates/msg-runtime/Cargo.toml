@@ -6,7 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+axum = "0.8"
 clap.workspace = true
+msg-control-api = { path = "../msg-control-api" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 
 [lib]
 path = "src/lib.rs"

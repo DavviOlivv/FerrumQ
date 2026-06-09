@@ -12,7 +12,10 @@ pub use commands::{
     AckCommand, ConsumeCommand, CreateTopicCommand, DlqQuery, NackCommand, PublishCommand,
 };
 pub use delivery::{ConsumedMessage, DeadLetterEntry, PublishedMessage, RetrySummary};
-pub use durable::{DurableBroker, DurableBrokerConfig, DurableBrokerError, DurableBrokerResult};
+pub use durable::{
+    DurableBroker, DurableBrokerConfig, DurableBrokerError, DurableBrokerResult,
+    DurableBrokerStatus,
+};
 pub use errors::{BrokerError, BrokerResult};
 
 /// Returns this crate's package name.

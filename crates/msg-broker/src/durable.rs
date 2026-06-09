@@ -41,6 +41,37 @@ pub struct DurableBrokerConfig {
     pub max_segment_bytes: u64,
 }
 
+/// Read-only summary of the local durable broker state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableBrokerStatus {
+    mode: &'static str,
+    topic_count: usize,
+    dlq_count: usize,
+    root_dir: PathBuf,
+}
+
+impl DurableBrokerStatus {
+    #[must_use]
+    pub fn mode(&self) -> &'static str {
+        self.mode
+    }
+
+    #[must_use]
+    pub fn topic_count(&self) -> usize {
+        self.topic_count
+    }
+
+    #[must_use]
+    pub fn dlq_count(&self) -> usize {
+        self.dlq_count
+    }
+
+    #[must_use]
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+}
+
 impl DurableBrokerConfig {
     #[must_use]
     pub fn new(
@@ -288,6 +319,39 @@ impl DurableBroker {
         self.topics.insert(topic.name().clone(), durable_topic);
 
         Ok(topic)
+    }
+
+    /// Lists topics in deterministic topic-name order.
+    #[must_use]
+    pub fn list_topics(&self) -> Vec<Topic> {
+        self.topics
+            .values()
+            .map(|durable_topic| durable_topic.topic.clone())
+            .collect()
+    }
+
+    /// Returns topic metadata for a known topic.
+    pub fn get_topic(&self, name: &TopicName) -> DurableBrokerResult<Topic> {
+        self.topics
+            .get(name)
+            .map(|durable_topic| durable_topic.topic.clone())
+            .ok_or_else(|| {
+                BrokerError::TopicNotFound {
+                    topic: name.clone(),
+                }
+                .into()
+            })
+    }
+
+    /// Returns a read-only summary of the local durable broker state.
+    #[must_use]
+    pub fn status(&self) -> DurableBrokerStatus {
+        DurableBrokerStatus {
+            mode: "local-durable",
+            topic_count: self.topics.len(),
+            dlq_count: self.state.dead_letters.len(),
+            root_dir: self.config.root_dir.clone(),
+        }
     }
 
     /// Publishes one envelope to a topic partition.

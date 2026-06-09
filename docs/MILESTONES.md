@@ -137,6 +137,25 @@ Deferred from Milestone 4:
 - DLQ inspection.
 - Health and readiness.
 
+Status: implemented as a local control-plane HTTP adapter in `crates/msg-control-api` and `brokerd serve`.
+
+Implemented scope:
+
+- Axum router with `GET /health`, `GET /ready`, `GET /v1/status`, `POST /v1/topics`, `GET /v1/topics`, `GET /v1/topics/{topicName}`, and `GET /v1/dlq`.
+- Local durable backing state using `DurableBroker` opened from `ControlApiConfig.data_dir`.
+- Read-only durable broker inspection APIs for deterministic topic listing, topic lookup, and local durable status.
+- Explicit camelCase JSON DTOs rather than exposing raw domain structs.
+- Stable error envelope with `code`, `message`, `details`, and `statusCode`.
+- Duplicate topic creation maps to `409 Conflict` through the existing `TopicAlreadyExists` broker contract.
+- `brokerd serve --data-dir ./.ferrumq --listen 127.0.0.1:8080` with no daemonization.
+- Router integration tests using `tempfile` and Tower calls instead of fixed ports.
+
+Deferred from Milestone 5:
+
+- HTTP publish, consume, ACK, and NACK data-plane endpoints.
+- Consumer group inspection beyond DLQ entries already tied to consumer groups.
+- Auth/RBAC, TLS, rate limiting, clustering, replication, consensus, background workers, config files, and TypeScript CLI/TUI integration.
+
 ## Milestone 6: Data Plane API
 
 - gRPC with tonic/prost.

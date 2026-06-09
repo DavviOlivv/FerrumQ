@@ -10,6 +10,14 @@ Milestone 3 adds `msg-storage` as an independent synchronous local append-only l
 
 Milestone 4 adds `DurableBroker` in `msg-broker` as a local durable at-least-once delivery foundation while keeping `BrokerService` unchanged as the in-memory broker. Durable messages are stored through `msg-storage` under `<root>/messages`; topic metadata and delivery transitions are stored in `<root>/broker-state/events.jsonl`. Successfully published messages are recoverable after broker reopen, successfully ACKed messages are not redelivered after reopen, unACKed messages may be redelivered after reopen, and duplicate or stale delivery IDs fail as not found. The broker-state format and recovery rules are documented in [docs/BROKER_STATE_FORMAT.md](docs/BROKER_STATE_FORMAT.md). Consumers must be idempotent. This is local filesystem durability only, not clustering, replication, consensus, HTTP/gRPC API behavior, CLI/TUI broker semantics, or exactly-once delivery.
 
+Milestone 5 adds `msg-control-api`, an Axum HTTP control-plane adapter backed by `DurableBroker`, and wires `brokerd serve`. The API exposes health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection only. It intentionally does not expose HTTP publish, consume, ACK, or NACK data-plane endpoints. Endpoint shapes and errors are documented in [docs/API.md](docs/API.md).
+
+Start the local control-plane server:
+
+```sh
+cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
+```
+
 ## Architecture Direction
 
 - Modular monolith first, with explicit crate and package boundaries.

@@ -1,10 +1,10 @@
 # Testing Strategy
 
-FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer. Milestone 2 adds broker behavior coverage for synchronous in-memory delivery semantics. Milestone 3 adds filesystem-backed storage coverage for the local append-only log foundation. Milestone 4 adds durable broker reopen coverage for local at-least-once delivery.
+FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer. Milestone 2 adds broker behavior coverage for synchronous in-memory delivery semantics. Milestone 3 adds filesystem-backed storage coverage for the local append-only log foundation. Milestone 4 adds durable broker reopen coverage for local at-least-once delivery. Milestone 5 adds control-plane HTTP adapter coverage against Axum routers without fixed ports.
 
 ## Unit Tests
 
-Every Rust crate and TypeScript package should keep focused unit tests for local behavior. Milestone 1 includes `msg-core` unit tests for validated names and identifiers, topic partition configuration, message envelope construction, consumer groups, consumers, subscriptions, delivery attempts, ACK/NACK commands, retry policy validation, dead-letter reasons, delivery states, and serde round trips. Milestone 2 adds `msg-broker` tests for create topic, publish partition assignment, consume pending behavior, ACK, NACK, retry backoff, lease expiry, DLQ routing, offset uniqueness, and no-redelivery invariants. Milestone 3 keeps `msg-storage` unit coverage minimal and emphasizes integration tests because correctness depends on filesystem layout and byte-level recovery behavior. Milestone 4 adds `msg-broker` durable integration tests for reopen and failure behavior. Other crates and TypeScript packages still keep their smoke coverage.
+Every Rust crate and TypeScript package should keep focused unit tests for local behavior. Milestone 1 includes `msg-core` unit tests for validated names and identifiers, topic partition configuration, message envelope construction, consumer groups, consumers, subscriptions, delivery attempts, ACK/NACK commands, retry policy validation, dead-letter reasons, delivery states, and serde round trips. Milestone 2 adds `msg-broker` tests for create topic, publish partition assignment, consume pending behavior, ACK, NACK, retry backoff, lease expiry, DLQ routing, offset uniqueness, and no-redelivery invariants. Milestone 3 keeps `msg-storage` unit coverage minimal and emphasizes integration tests because correctness depends on filesystem layout and byte-level recovery behavior. Milestone 4 adds `msg-broker` durable integration tests for reopen and failure behavior. Milestone 5 keeps control API behavior in integration tests and retains crate smoke tests. Other crates and TypeScript packages still keep their smoke coverage.
 
 ## Integration Tests
 
@@ -12,9 +12,11 @@ Milestone 2 uses Rust integration-style tests against the public `msg-broker` AP
 
 Storage recovery tests directly mutate local segment files to cover truncated final length, checksum header, and payload bytes; extra final trailing bytes; final checksum mismatch; final invalid JSON; final metadata mismatch; middle checksum mismatch; middle invalid JSON; empty segment handling; and out-of-sequence segment bases. Milestone 4 durable broker tests use `tempfile` roots to cover publish/reopen recovery, ACK/reopen no-redelivery, duplicate and stale delivery IDs, in-flight/reopen redelivery with incremented attempts, NACK/reopen backoff, retry attempt preservation, DLQ/reopen recovery and metadata, partition/offset determinism, failed message append without phantom visibility, broker-state corruption handling, message-log corruption propagation, and segment/recovery integration through `msg-storage`.
 
+Milestone 5 control API integration tests call the Axum router through Tower services, not fixed ports. They cover health, readiness, topic creation, duplicate topic `409 Conflict`, invalid names, zero partitions, deterministic topic listing, topic lookup, missing topics, persistence across `open_state` with the same temp directory, status counts, DLQ item envelopes, topic-filtered DLQ inspection, and malformed JSON returning the stable `400 INVALID_REQUEST` envelope.
+
 ## End-to-End Tests
 
-Future E2E tests will launch the broker runtime and use CLI/SDK flows for create topic, publish, consume, ACK/NACK, retries, and DLQ inspection. Milestone 2 does not add E2E tests because no runtime daemon behavior or network API is implemented.
+Future E2E tests will launch the broker runtime and use CLI/SDK flows for create topic, publish, consume, ACK/NACK, retries, and DLQ inspection. Milestone 5 adds runtime smoke coverage through `brokerd --version`, but it does not add process-level HTTP E2E tests yet.
 
 ## Property-Based Tests
 
@@ -49,6 +51,7 @@ The local and CI gates are:
 - `cargo clippy --workspace --all-targets -- -D warnings`.
 - `cargo test --workspace` or `cargo nextest run --workspace` when available.
 - `cargo build --workspace`.
+- `cargo run -p msg-runtime --bin brokerd -- --version`.
 - `pnpm install --frozen-lockfile`.
 - `pnpm format:check`.
 - `pnpm lint`.
