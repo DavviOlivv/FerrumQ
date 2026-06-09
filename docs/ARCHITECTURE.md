@@ -32,6 +32,8 @@ Milestone 5 adds an HTTP adapter without changing broker semantics. `msg-control
 
 Milestone 6 adds a gRPC data-plane adapter without moving broker semantics into the protocol layer. `msg-protocol` owns protobuf contracts and generated Rust service/types, while `msg-data-plane` owns protobuf-to-domain mapping, mutex-backed access to the synchronous `DurableBroker`, and sanitized gRPC status mapping. The adapter calls public broker APIs only. Consume remains unary and explicitly carries `max_messages`, `lease_ms`, and `now_unix_ms`; streaming consumption, SDK integration, auth/TLS, clustering/replication, exactly-once semantics, and background retry workers remain deferred.
 
+Milestone 7 adds the first TypeScript CLI foundation without creating a TypeScript broker. `@ferrumq/cli` validates command input, resolves configuration, formats human and JSON output, and calls the Rust-owned adapters: HTTP for control-plane commands and unary gRPC for data-plane commands. `@ferrumq/protocol` provides only the small schemas and dynamic gRPC helper needed by the CLI, not a public SDK. Broker process supervision, streaming consume, auth/TLS, and distributed behavior remain deferred.
+
 Planned dependency direction:
 
 ```txt
@@ -51,6 +53,8 @@ The control plane manages topics, partitions, consumer groups, DLQ inspection, h
 Milestone 5 implements the first control-plane adapter with Axum and local durable backing state. It uses explicit JSON DTOs and a stable error envelope, including `409 Conflict` for duplicate topic creation, `404` for valid unknown topics, `503` when broker state is unavailable, and JSON-envelope responses for unknown routes or unsupported methods.
 
 Milestone 6 implements the first data-plane adapter with tonic/prost and the local durable broker. The gRPC service exposes unary `Publish`, `Consume`, `Ack`, and `Nack` calls. Delivery remains local durable at-least-once and `idempotency_key` is metadata-only, so consumers must be idempotent and producers do not get deduplication guarantees yet. It maps validation failures to `INVALID_ARGUMENT`, unknown topics and stale deliveries to `NOT_FOUND`, invalid delivery ownership to `FAILED_PRECONDITION`, duplicate topics to `ALREADY_EXISTS` if surfaced through broker APIs, unavailable broker state to `UNAVAILABLE`, and storage/corruption/unexpected failures to sanitized `INTERNAL` statuses.
+
+Milestone 7 exposes both planes through `ferrumq`: health, readiness, status, topic, and DLQ commands use HTTP; publish, consume, ACK, and NACK commands use unary gRPC. JSON CLI output wraps each command family in stable top-level keys and represents gRPC `uint64` values as decimal strings.
 
 ## Future Distributed Evolution
 

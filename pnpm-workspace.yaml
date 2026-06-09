@@ -2,5 +2,7 @@ packages:
   - packages/*
 onlyBuiltDependencies:
   - esbuild
+  - protobufjs
 allowBuilds:
   esbuild: true
+  protobufjs: true

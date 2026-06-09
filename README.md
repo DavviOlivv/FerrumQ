@@ -12,7 +12,9 @@ Milestone 4 adds `DurableBroker` in `msg-broker` as a local durable at-least-onc
 
 Milestone 5 adds `msg-control-api`, an Axum HTTP control-plane adapter backed by local durable `DurableBroker` state, and wires `brokerd serve`. The API exposes health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection only. It intentionally does not expose HTTP publish, consume, ACK, or NACK data-plane endpoints. Endpoint shapes, deterministic topic ordering, duplicate topic behavior, unsupported route/method behavior, readiness semantics, and stable JSON error envelopes are documented in [docs/API.md](docs/API.md).
 
-Milestone 6 adds a unary gRPC data-plane foundation while HTTP remains control-plane only. Protobuf contracts live in `msg-protocol` under `ferrumq.dataplane.v1`, `msg-data-plane` maps those DTOs to public `DurableBroker` publish, consume, ACK, and NACK APIs, and `brokerd serve-grpc` serves the adapter from local durable state. Delivery is local durable at-least-once, so consumers must be idempotent. The `idempotency_key` field is metadata-only and is not enforced for publish deduplication yet. Streaming consume, generated TypeScript clients, SDK integration, auth, TLS, rate limiting, clustering, replication, exactly-once semantics, MaaS/multi-tenancy, and distributed broker behavior remain deferred.
+Milestone 6 adds a unary gRPC data-plane foundation while HTTP remains control-plane only. Protobuf contracts live in `msg-protocol` under `ferrumq.dataplane.v1`, `msg-data-plane` maps those DTOs to public `DurableBroker` publish, consume, ACK, and NACK APIs, and `brokerd serve-grpc` serves the adapter from local durable state. Delivery is local durable at-least-once, so consumers must be idempotent. The `idempotency_key` field is metadata-only and is not enforced for publish deduplication yet.
+
+Milestone 7 adds the first usable TypeScript CLI. The binary is `ferrumq`, with `msg` kept as a compatibility alias. The CLI is an adapter only: HTTP for control-plane commands and unary gRPC for publish, consume, ACK, and NACK. Rust remains the source of broker behavior. CLI usage, defaults, JSON output wrappers, and deferred process-management scope are documented in [docs/CLI.md](docs/CLI.md). Streaming consume, generated public SDKs, auth, TLS, rate limiting, clustering, replication, exactly-once semantics, MaaS/multi-tenancy, and distributed broker behavior remain deferred.
 
 Start the local control-plane server:
 
@@ -56,6 +58,9 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm --filter @ferrumq/cli build
+node packages/cli/dist/cli.js --version
+node packages/cli/dist/cli.js --help
 cargo run -p msg-runtime --bin brokerd -- --version
 git diff --check
 ```

@@ -61,4 +61,7 @@ ci:
 	pnpm typecheck
 	pnpm test
 	pnpm build
+	pnpm --filter @ferrumq/cli build
+	node packages/cli/dist/cli.js --version
+	node packages/cli/dist/cli.js --help
 	$(MAKE) audit

@@ -1,6 +1,8 @@
 # HTTP Control API
 
 Milestone 5 exposes a local HTTP control plane backed by `DurableBroker`.
+Milestone 7 uses this API from the TypeScript `ferrumq` CLI for control-plane
+commands only.
 
 Start the server:
 
@@ -8,7 +10,7 @@ Start the server:
 cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
 ```
 
-This API is control-plane only. It manages and inspects local durable broker state. It does not provide HTTP publish, consume, ACK, or NACK endpoints. gRPC/TCP data-plane APIs, TypeScript CLI/TUI behavior, auth, TLS, rate limiting, observability export, clustering, replication, and exactly-once semantics are intentionally deferred.
+This API is control-plane only. It manages and inspects local durable broker state. It does not provide HTTP publish, consume, ACK, or NACK endpoints. The TypeScript CLI uses unary gRPC for those data-plane commands. TypeScript TUI behavior, auth, TLS, rate limiting, observability export, clustering, replication, and exactly-once semantics are intentionally deferred.
 
 All JSON responses, including API-owned error responses, use `application/json`. Endpoints with JSON request bodies require `Content-Type: application/json`.
 

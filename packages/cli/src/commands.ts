@@ -1,0 +1,370 @@
+import {
+  createGrpcDataPlaneClient,
+  formatGrpcError,
+  type DataPlaneClient,
+} from "@ferrumq/protocol";
+import { randomUUID as nodeRandomUUID } from "node:crypto";
+
+import {
+  defaultConsumerId,
+  defaultPublishContentType,
+  defaultPublishSource,
+  defaultPublishType,
+  type ResolvedConfig,
+} from "./config.js";
+import { ExpectedCliError } from "./errors.js";
+import { brokerHelpText, rootHelpText, versionText } from "./help.js";
+import {
+  createControlPlaneClient,
+  type ControlPlaneClient,
+  type FetchLike,
+} from "./http-client.js";
+import {
+  consumedMessageJson,
+  formatDlq,
+  formatMessages,
+  formatPublished,
+  formatStatus,
+  formatTopic,
+  formatTopicList,
+  jsonLine,
+} from "./format.js";
+import { runBrokerdVersion, type BrokerdVersionRunner } from "./brokerd.js";
+import {
+  parsePositiveInteger,
+  validateBoundedText,
+  validateConsumerGroup,
+  validateNonEmptyPayload,
+  validateTopic,
+} from "./validation.js";
+
+import type { ParsedCommand } from "./parser.js";
+
+export interface CommandDependencies {
+  fetch?: FetchLike;
+  controlClient?: ControlPlaneClient;
+  dataPlaneClient?: DataPlaneClient;
+  dataPlaneClientFactory?: (grpcUrl: string) => DataPlaneClient;
+  brokerdVersionRunner?: BrokerdVersionRunner;
+  now?: () => number;
+  randomUUID?: () => string;
+}
+
+export interface CommandResult {
+  stdout: string;
+}
+
+interface CommandContext {
+  config: ResolvedConfig;
+  dependencies: CommandDependencies;
+}
+
+export async function executeCommand(
+  command: ParsedCommand,
+  config: ResolvedConfig,
+  dependencies: CommandDependencies = {},
+): Promise<CommandResult> {
+  const context: CommandContext = { config, dependencies };
+
+  switch (command.kind) {
+    case "root-help":
+      return text(rootHelpText());
+    case "version":
+      return text(versionText());
+    case "broker-help":
+      return text(brokerHelpText());
+    case "broker-version":
+      return text(await brokerdVersion(context)());
+    case "health":
+      return health(context);
+    case "ready":
+      return ready(context);
+    case "status":
+      return status(context);
+    case "topic-create":
+      return topicCreate(context, command);
+    case "topic-get":
+      return topicGet(context, command);
+    case "topic-list":
+      return topicList(context);
+    case "dlq-list":
+      return dlqList(context, command);
+    case "publish":
+      return publish(context, command);
+    case "consume":
+      return consume(context, command);
+    case "ack":
+      return ack(context, command);
+    case "nack":
+      return nack(context, command);
+  }
+}
+
+async function health(context: CommandContext): Promise<CommandResult> {
+  const response = await controlClient(context).health();
+  return context.config.json
+    ? text(jsonLine({ health: response }))
+    : text(`health: ${response.status}`);
+}
+
+async function ready(context: CommandContext): Promise<CommandResult> {
+  const response = await controlClient(context).ready();
+  return context.config.json
+    ? text(jsonLine({ ready: response }))
+    : text(`ready: ${response.status}`);
+}
+
+async function status(context: CommandContext): Promise<CommandResult> {
+  const response = await controlClient(context).status();
+  return context.config.json
+    ? text(jsonLine({ status: response }))
+    : text(formatStatus(response));
+}
+
+async function topicCreate(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "topic-create" }>,
+): Promise<CommandResult> {
+  const topic = validateTopic(command.topic);
+  const partitions =
+    command.partitions === undefined
+      ? 1
+      : parsePositiveInteger(command.partitions, "--partitions");
+  const response = await controlClient(context).createTopic(topic, partitions);
+  return context.config.json
+    ? text(jsonLine({ topic: response }))
+    : text(formatTopic(response, "topic created"));
+}
+
+async function topicGet(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "topic-get" }>,
+): Promise<CommandResult> {
+  const response = await controlClient(context).getTopic(
+    validateTopic(command.topic),
+  );
+  return context.config.json
+    ? text(jsonLine({ topic: response }))
+    : text(formatTopic(response));
+}
+
+async function topicList(context: CommandContext): Promise<CommandResult> {
+  const response = await controlClient(context).listTopics();
+  return context.config.json
+    ? text(jsonLine({ topics: response.items }))
+    : text(formatTopicList(response.items));
+}
+
+async function dlqList(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "dlq-list" }>,
+): Promise<CommandResult> {
+  const topic =
+    command.topic === undefined ? undefined : validateTopic(command.topic);
+  const response = await controlClient(context).listDlq(topic);
+  return context.config.json
+    ? text(jsonLine({ dlq: { items: response.items } }))
+    : text(formatDlq(response.items));
+}
+
+async function publish(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "publish" }>,
+): Promise<CommandResult> {
+  const topic = validateTopic(command.topic);
+  const data = validateNonEmptyPayload(required(command.data, "--data"));
+  const messageId =
+    command.messageId === undefined
+      ? `msg_${randomUUID(context)()}`
+      : validateBoundedText(command.messageId, "message ID");
+  const response = await dataPlaneClient(context).publish({
+    topic,
+    messageId,
+    payload: Buffer.from(data, "utf8"),
+    contentType: validateBoundedText(
+      command.contentType ?? defaultPublishContentType,
+      "content type",
+    ),
+    type: validateBoundedText(
+      command.type ?? defaultPublishType,
+      "message type",
+    ),
+    source: validateBoundedText(
+      command.source ?? defaultPublishSource,
+      "message source",
+    ),
+    timeUnixMs: String(now(context)()),
+    ...(command.key === undefined
+      ? {}
+      : { key: validateBoundedText(command.key, "partition key") }),
+    ...(command.subject === undefined
+      ? {}
+      : { subject: validateBoundedText(command.subject, "subject") }),
+    ...(command.idempotencyKey === undefined
+      ? {}
+      : {
+          idempotencyKey: validateBoundedText(
+            command.idempotencyKey,
+            "idempotency key",
+          ),
+        }),
+  });
+
+  return context.config.json
+    ? text(
+        jsonLine({
+          message: {
+            id: response.messageId,
+            topic: response.topic,
+            partition: response.partition,
+            offset: response.offset,
+          },
+        }),
+      )
+    : text(formatPublished(response));
+}
+
+async function consume(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "consume" }>,
+): Promise<CommandResult> {
+  const response = await dataPlaneClient(context).consume({
+    topic: validateTopic(command.topic),
+    consumerGroup: validateConsumerGroup(required(command.group, "--group")),
+    consumerId: validateBoundedText(
+      command.consumerId ?? defaultConsumerId,
+      "consumer ID",
+    ),
+    maxMessages:
+      command.max === undefined
+        ? 1
+        : parsePositiveInteger(command.max, "--max"),
+    leaseMs: String(
+      command.leaseMs === undefined
+        ? 30_000
+        : parsePositiveInteger(command.leaseMs, "--lease-ms"),
+    ),
+    nowUnixMs: String(now(context)()),
+  });
+
+  return context.config.json
+    ? text(jsonLine({ messages: response.messages.map(consumedMessageJson) }))
+    : text(formatMessages(response.messages));
+}
+
+async function ack(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "ack" }>,
+): Promise<CommandResult> {
+  const deliveryId = validateBoundedText(command.deliveryId, "delivery ID");
+  const consumerId = validateBoundedText(
+    command.consumerId ?? defaultConsumerId,
+    "consumer ID",
+  );
+  await dataPlaneClient(context).ack({ deliveryId, consumerId });
+  return context.config.json
+    ? text(jsonLine({ ack: { deliveryId, consumerId } }))
+    : text(`acked: ${deliveryId} consumer=${consumerId}`);
+}
+
+async function nack(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "nack" }>,
+): Promise<CommandResult> {
+  const deliveryId = validateBoundedText(command.deliveryId, "delivery ID");
+  const consumerId = validateBoundedText(
+    command.consumerId ?? defaultConsumerId,
+    "consumer ID",
+  );
+  const reason =
+    command.reason === undefined
+      ? undefined
+      : validateBoundedText(command.reason, "reason");
+  await dataPlaneClient(context).nack({
+    deliveryId,
+    consumerId,
+    ...(reason === undefined ? {} : { reason }),
+  });
+  return context.config.json
+    ? text(
+        jsonLine({ nack: { deliveryId, consumerId, reason: reason ?? null } }),
+      )
+    : text(
+        `nacked: ${deliveryId} consumer=${consumerId}${reason === undefined ? "" : ` reason=${reason}`}`,
+      );
+}
+
+function controlClient(context: CommandContext): ControlPlaneClient {
+  return (
+    context.dependencies.controlClient ??
+    createControlPlaneClient(
+      context.config.controlUrl,
+      context.dependencies.fetch,
+    )
+  );
+}
+
+function dataPlaneClient(context: CommandContext): DataPlaneClient {
+  const client =
+    context.dependencies.dataPlaneClient ??
+    context.dependencies.dataPlaneClientFactory?.(context.config.grpcUrl) ??
+    createGrpcDataPlaneClient(context.config.grpcUrl);
+
+  return wrapGrpcErrors(client);
+}
+
+function wrapGrpcErrors(client: DataPlaneClient): DataPlaneClient {
+  return {
+    async publish(request) {
+      try {
+        return await client.publish(request);
+      } catch (error) {
+        throw new ExpectedCliError(formatGrpcError(error));
+      }
+    },
+    async consume(request) {
+      try {
+        return await client.consume(request);
+      } catch (error) {
+        throw new ExpectedCliError(formatGrpcError(error));
+      }
+    },
+    async ack(request) {
+      try {
+        await client.ack(request);
+      } catch (error) {
+        throw new ExpectedCliError(formatGrpcError(error));
+      }
+    },
+    async nack(request) {
+      try {
+        await client.nack(request);
+      } catch (error) {
+        throw new ExpectedCliError(formatGrpcError(error));
+      }
+    },
+  };
+}
+
+function brokerdVersion(context: CommandContext): BrokerdVersionRunner {
+  return context.dependencies.brokerdVersionRunner ?? runBrokerdVersion;
+}
+
+function now(context: CommandContext): () => number {
+  return context.dependencies.now ?? Date.now;
+}
+
+function randomUUID(context: CommandContext): () => string {
+  return context.dependencies.randomUUID ?? nodeRandomUUID;
+}
+
+function required(value: string | undefined, flag: string): string {
+  if (value === undefined) {
+    throw new ExpectedCliError(`${flag} is required`);
+  }
+  return value;
+}
+
+function text(stdout: string): CommandResult {
+  return { stdout };
+}

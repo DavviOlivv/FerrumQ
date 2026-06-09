@@ -197,6 +197,24 @@ Deferred from Milestone 6:
 - Error formatting.
 - E2E tests against broker.
 
+Status: implemented as the first usable TypeScript CLI foundation.
+
+Implemented scope:
+
+- `ferrumq` public binary with `msg` compatibility alias.
+- Hand-rolled async parser and command runner split across parsing, config, HTTP/gRPC clients, command handlers, output formatting, and expected-error handling.
+- Global `--control-url`, `--grpc-url`, and `--json`, plus `FERRUMQ_CONTROL_URL` and `FERRUMQ_GRPC_URL`, resolved as flag over environment over default.
+- HTTP control-plane commands for health, readiness, status, topic create/get/list, and DLQ list.
+- Unary gRPC data-plane commands for publish, consume, ACK, and NACK.
+- Stable JSON wrappers and human-readable default output.
+- `broker version` as a thin `brokerd --version` wrapper, with broker process management intentionally deferred.
+- `@ferrumq/protocol` HTTP DTO schemas, FerrumQ error-envelope schema, gRPC URL normalization, dynamic proto loading, and a tiny CLI-facing data-plane client helper.
+- Vitest coverage for parser/config/validation/output/HTTP/gRPC/error behavior and built CLI version/help smoke checks.
+
+Deferred from Milestone 7:
+
+- TypeScript TUI, public SDK surface, generated TypeScript clients, streaming consume, auth/RBAC, TLS, rate limiting, broker process supervision, observability dashboards/export, clustering, replication, exactly-once semantics, and MaaS/multi-tenancy.
+
 ## Milestone 8: TypeScript TUI
 
 - Ink dashboard.

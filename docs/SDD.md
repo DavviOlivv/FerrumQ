@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`. Milestone 7 adds the first usable TypeScript CLI as an adapter over those Rust-owned APIs.
 
 ## 1. Product Vision
 
@@ -23,6 +23,7 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No HTTP publish, consume, ACK, or NACK endpoints in Milestone 5.
 - No auth/RBAC, TLS, rate limiting, clustering, replication, consensus, or daemonization in Milestone 5.
 - No streaming consume, generated TypeScript gRPC clients, SDK integration, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, exactly-once semantics, or daemonization in Milestone 6.
+- No TypeScript broker process supervision, public SDK surface, streaming consume, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, or exactly-once semantics in Milestone 7.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
 
@@ -118,23 +119,43 @@ The data plane handles publish, consume, ACK, and NACK. Milestone 6 implements t
 
 `msg-data-plane` owns explicit protobuf-to-domain mapping, keeps `DurableBroker` behind `Arc<Mutex<_>>`, calls public broker APIs only, and returns sanitized gRPC statuses. Delivery is local durable at-least-once; consumers must be idempotent. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and unknown, duplicate, or stale deliveries map to `NOT_FOUND`; wrong delivery ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if encountered; poisoned broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected broker failures map to `INTERNAL`.
 
-## 20. Observability
+## 20. TypeScript CLI
+
+Milestone 7 implements `ferrumq` as the first usable TypeScript CLI and keeps
+`msg` as a compatibility alias. The CLI owns command parsing, config
+resolution, boundary validation, output formatting, and expected-error
+formatting. It does not own broker behavior.
+
+Global `--control-url`, `--grpc-url`, and `--json` flags are supported.
+`FERRUMQ_CONTROL_URL` and `FERRUMQ_GRPC_URL` are also supported. Precedence is
+flag, then environment, then default. Defaults are
+`http://127.0.0.1:8080` for HTTP and `http://127.0.0.1:9090` for gRPC.
+
+Control-plane CLI commands call HTTP: health, ready, status, topic create/get/list,
+and DLQ list. Data-plane CLI commands call unary gRPC: publish, consume, ACK,
+and NACK. `broker version` shells out to `brokerd --version`; start/supervise
+commands remain deferred.
+
+Human-readable output is the default. `--json` uses stable wrappers and renders
+gRPC `uint64` response fields as decimal strings.
+
+## 21. Observability
 
 Broker internals must be observable through structured logs and later metrics/traces. Use `tracing`, `tracing-subscriber`, and future OpenTelemetry integration.
 
-## 21. Security Assumptions
+## 22. Security Assumptions
 
 Early milestones assume local development. Authentication, authorization, multi-tenant isolation, and secret management are future work and must not be implied by Milestone 2 code.
 
-## 22. Testing Strategy Summary
+## 23. Testing Strategy Summary
 
-The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Milestone 6 adds protocol generation/exposure tests, in-process tonic service tests for publish/consume/ACK/NACK and durability, and runtime smoke tests for `serve-grpc`. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
+The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Milestone 6 adds protocol generation/exposure tests, in-process tonic service tests for publish/consume/ACK/NACK and durability, and runtime smoke tests for `serve-grpc`. Milestone 7 adds Vitest coverage for CLI parsing, config precedence, validation, JSON output, HTTP success/error handling, network failures, mocked gRPC data-plane commands, gRPC status formatting, and built CLI smoke tests. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
 
-## 23. Milestone Roadmap
+## 24. Milestone Roadmap
 
 The roadmap is defined in [MILESTONES.md](MILESTONES.md), from project skeleton through hardening review.
 
-## 24. Invariants
+## 25. Invariants
 
 - A message appended through durable storage must be recoverable according to the configured durability policy.
 - A delivered but unacked message may be delivered again.

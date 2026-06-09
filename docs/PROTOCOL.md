@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes protocol contracts. Milestone 6 adds the first protobuf/gRPC data-plane contract while the TypeScript protocol package remains a placeholder surface.
+This document describes protocol contracts. Milestone 6 adds the first protobuf/gRPC data-plane contract. Milestone 7 expands the TypeScript protocol package into a small CLI-facing helper surface with HTTP Zod schemas, FerrumQ error-envelope schemas, gRPC URL normalization, dynamic proto loading, and a unary data-plane client helper.
 
 ## Message Envelope
 
@@ -22,6 +22,23 @@ FerrumQ uses a CloudEvents-inspired envelope. The project does not implement ful
 ## JSON Boundary
 
 Initial HTTP/control plane APIs should use JSON DTOs with explicit versioning. TypeScript and Rust protocol packages should validate external input and avoid implicit broker semantics.
+
+## TypeScript Protocol Helper
+
+`@ferrumq/protocol` is not a public SDK in Milestone 7. It exports the small
+contract helpers needed by `@ferrumq/cli`:
+
+- Zod schemas for HTTP control-plane success DTOs and FerrumQ error envelopes.
+- DTO types for topic, status, DLQ, and data-plane command responses.
+- `createGrpcDataPlaneClient` using `@grpc/grpc-js` and
+  `@grpc/proto-loader` against
+  `crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto`.
+- `normalizeGrpcTarget`, which accepts `http://host:port` and rejects HTTPS/TLS
+  because auth/TLS are deferred.
+- gRPC status formatting helpers for short CLI expected errors.
+
+Dynamic gRPC loading uses decimal strings for `uint64` response values so CLI
+JSON output does not lose precision for offsets or timestamps.
 
 ## gRPC Data Plane
 

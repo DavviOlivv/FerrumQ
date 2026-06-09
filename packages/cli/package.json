@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
+    "ferrumq": "./dist/cli.js",
     "msg": "./dist/cli.js"
   },
   "exports": {
@@ -19,6 +20,10 @@
     "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && chmod +x dist/cli.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ferrumq/protocol": "workspace:*",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
