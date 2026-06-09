@@ -84,6 +84,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/topics", post(create_topic).get(list_topics))
         .route("/v1/topics/{topicName}", get(get_topic))
         .route("/v1/dlq", get(list_dlq))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
 }
 
@@ -97,7 +99,9 @@ async fn ready(State(state): State<AppState>) -> Result<Json<StatusResponse>, Ap
         Ok(Json(StatusResponse { status: "ready" }))
     })
     .map_err(|error| match error {
-        ApiError::Internal => ApiError::not_ready("durable broker state is not accessible"),
+        ApiError::BrokerUnavailable(_) | ApiError::Internal => {
+            ApiError::broker_unavailable("durable broker state is not accessible")
+        }
         other => other,
     })
 }
@@ -194,7 +198,10 @@ fn with_broker<T>(
     state: &AppState,
     operation: impl FnOnce(&mut DurableBroker) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
-    let mut broker = state.broker.lock().map_err(|_| ApiError::Internal)?;
+    let mut broker = state
+        .broker
+        .lock()
+        .map_err(|_| ApiError::broker_unavailable("durable broker state is not accessible"))?;
     operation(&mut broker)
 }
 
@@ -217,6 +224,14 @@ fn dead_letter_reason(reason: &DeadLetterReason) -> String {
         DeadLetterReason::Poisoned => "poisoned".to_owned(),
         DeadLetterReason::Manual(reason) => reason.clone(),
     }
+}
+
+async fn not_found() -> ApiError {
+    ApiError::RouteNotFound("route not found".to_owned())
+}
+
+async fn method_not_allowed() -> ApiError {
+    ApiError::MethodNotAllowed("method not allowed".to_owned())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,32 +297,47 @@ struct DlqEntryResponse {
 #[derive(Debug, Clone)]
 enum ApiError {
     InvalidRequest(String),
-    Conflict(String),
-    NotFound(String),
-    NotReady(String),
+    ValidationError(String),
+    TopicAlreadyExists(String),
+    TopicNotFound(String),
+    BrokerUnavailable(String),
+    MethodNotAllowed(String),
+    RouteNotFound(String),
     Internal,
 }
 
 impl ApiError {
-    fn from_json_rejection(_rejection: JsonRejection) -> Self {
-        Self::InvalidRequest("request body must be valid JSON for this endpoint".to_owned())
+    fn from_json_rejection(rejection: JsonRejection) -> Self {
+        let message = match rejection {
+            JsonRejection::JsonSyntaxError(_) => "request body must be valid JSON",
+            JsonRejection::JsonDataError(_) => {
+                "request JSON must include the required fields with valid types"
+            }
+            JsonRejection::MissingJsonContentType(_) => {
+                "content-type must be application/json for this endpoint"
+            }
+            JsonRejection::BytesRejection(_) => "request body could not be read",
+            _ => "request body is invalid for this endpoint",
+        };
+
+        Self::InvalidRequest(message.to_owned())
     }
 
     fn from_domain(error: DomainError) -> Self {
-        Self::InvalidRequest(error.to_string())
+        Self::ValidationError(error.to_string())
     }
 
     fn from_durable(error: DurableBrokerError) -> Self {
         match error {
             DurableBrokerError::Broker(BrokerError::Domain(error)) => Self::from_domain(error),
             DurableBrokerError::Broker(BrokerError::TopicAlreadyExists { topic }) => {
-                Self::Conflict(format!("topic already exists: {topic}"))
+                Self::TopicAlreadyExists(format!("topic already exists: {topic}"))
             }
             DurableBrokerError::Broker(BrokerError::TopicNotFound { topic }) => {
-                Self::NotFound(format!("topic not found: {topic}"))
+                Self::TopicNotFound(format!("topic not found: {topic}"))
             }
             DurableBrokerError::Broker(BrokerError::InvalidConfig { field, reason }) => {
-                Self::InvalidRequest(format!("invalid broker config for {field}: {reason}"))
+                Self::ValidationError(format!("invalid broker config for {field}: {reason}"))
             }
             DurableBrokerError::Broker(BrokerError::DeliveryNotFound { .. })
             | DurableBrokerError::Broker(BrokerError::InvalidConsumer { .. })
@@ -319,16 +349,19 @@ impl ApiError {
         }
     }
 
-    fn not_ready(message: impl Into<String>) -> Self {
-        Self::NotReady(message.into())
+    fn broker_unavailable(message: impl Into<String>) -> Self {
+        Self::BrokerUnavailable(message.into())
     }
 
     fn status_code(&self) -> StatusCode {
         match self {
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::NotReady(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ValidationError(_) => StatusCode::BAD_REQUEST,
+            Self::TopicAlreadyExists(_) => StatusCode::CONFLICT,
+            Self::TopicNotFound(_) => StatusCode::NOT_FOUND,
+            Self::BrokerUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
+            Self::RouteNotFound(_) => StatusCode::NOT_FOUND,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -336,9 +369,12 @@ impl ApiError {
     fn code(&self) -> &'static str {
         match self {
             Self::InvalidRequest(_) => "INVALID_REQUEST",
-            Self::Conflict(_) => "TOPIC_ALREADY_EXISTS",
-            Self::NotFound(_) => "NOT_FOUND",
-            Self::NotReady(_) => "NOT_READY",
+            Self::ValidationError(_) => "VALIDATION_ERROR",
+            Self::TopicAlreadyExists(_) => "TOPIC_ALREADY_EXISTS",
+            Self::TopicNotFound(_) => "TOPIC_NOT_FOUND",
+            Self::BrokerUnavailable(_) => "BROKER_UNAVAILABLE",
+            Self::MethodNotAllowed(_) => "METHOD_NOT_ALLOWED",
+            Self::RouteNotFound(_) => "NOT_FOUND",
             Self::Internal => "INTERNAL_ERROR",
         }
     }
@@ -346,9 +382,12 @@ impl ApiError {
     fn message(&self) -> String {
         match self {
             Self::InvalidRequest(message)
-            | Self::Conflict(message)
-            | Self::NotFound(message)
-            | Self::NotReady(message) => message.clone(),
+            | Self::ValidationError(message)
+            | Self::TopicAlreadyExists(message)
+            | Self::TopicNotFound(message)
+            | Self::BrokerUnavailable(message)
+            | Self::MethodNotAllowed(message)
+            | Self::RouteNotFound(message) => message.clone(),
             Self::Internal => "internal server error".to_owned(),
         }
     }

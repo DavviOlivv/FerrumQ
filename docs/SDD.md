@@ -102,7 +102,7 @@ The control plane manages topics, partition inspection, consumer group inspectio
 }
 ```
 
-`brokerd serve --data-dir ./.ferrumq --listen 127.0.0.1:8080` opens the local durable broker and serves the control router. The Milestone 5 API is control-plane only: it exposes health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection. It does not expose data-plane publish, consume, ACK, or NACK behavior over HTTP.
+`brokerd serve --data-dir ./.ferrumq --listen 127.0.0.1:8080` opens the local durable broker and serves the control router. The Milestone 5 API is control-plane only: it exposes health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection. It does not expose data-plane publish, consume, ACK, or NACK behavior over HTTP. Duplicate topic creation returns `409 TOPIC_ALREADY_EXISTS`; valid but unknown topic lookups return `404 TOPIC_NOT_FOUND`; malformed JSON and wrong request shapes return `400 INVALID_REQUEST`; domain validation failures return `400 VALIDATION_ERROR`; unavailable broker state returns `503 BROKER_UNAVAILABLE`; internal broker/storage failures return sanitized `500 INTERNAL_ERROR`. Unsupported routes and methods also use the JSON envelope.
 
 ## 19. Data Plane
 
