@@ -16,5 +16,6 @@ thiserror = "2"
 tonic.workspace = true
 
 [dev-dependencies]
+msg-storage = { path = "../msg-storage" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

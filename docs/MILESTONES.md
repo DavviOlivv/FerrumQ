@@ -176,16 +176,19 @@ Implemented scope:
 - Explicit publish fields for topic, message ID, key, payload, content type, type, source, subject, idempotency key, and Unix-millisecond time.
 - Explicit consume fields for topic, consumer group, consumer ID, max messages, lease milliseconds, and Unix-millisecond now.
 - Explicit ACK/NACK delivery ownership fields through delivery ID and consumer ID, plus optional NACK reason.
+- Local durable at-least-once delivery through `DurableBroker`; consumers must be idempotent.
+- `idempotency_key` is carried as publish/consume metadata only and is not enforced for deduplication.
 - Per-request consume lease support in `ConsumeCommand`, with existing broker-config leases preserved for older callers.
 - `msg-data-plane` adapter backed by `Arc<Mutex<DurableBroker>>`, explicit protobuf-to-domain mapping, public broker API calls only, and sanitized gRPC status mapping.
 - `brokerd serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090` runtime wiring, while `brokerd --version` and `brokerd serve` remain unchanged.
-- Protocol exposure tests, in-process tonic adapter tests for publish, consume, ACK, NACK, retry/DLQ, and durable reopen flows, and runtime smoke tests for the gRPC subcommand.
+- Protocol exposure tests, in-process tonic adapter tests for publish, consume, ACK, NACK, retry/DLQ, sanitized status mapping, and durable reopen flows, and runtime smoke tests for the gRPC subcommand including invalid data-directory handling.
 
 Deferred from Milestone 6:
 
 - Streaming consume.
 - Generated TypeScript clients and SDK integration.
-- Auth/RBAC, TLS, rate limiting, observability export, dashboards, clustering, replication, consensus, exactly-once semantics, MaaS/multi-tenancy, background workers, and production daemon hardening.
+- Idempotency-key enforcement and exactly-once semantics.
+- Auth/RBAC, TLS, rate limiting, observability export, dashboards, clustering, replication, consensus, MaaS/multi-tenancy, background workers, and production daemon hardening.
 
 ## Milestone 7: TypeScript CLI
 

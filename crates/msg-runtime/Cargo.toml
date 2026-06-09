@@ -13,6 +13,9 @@ msg-data-plane = { path = "../msg-data-plane" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tonic = { workspace = true, features = ["transport"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lib]
 path = "src/lib.rs"
 

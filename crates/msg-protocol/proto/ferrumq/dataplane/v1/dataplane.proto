@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package ferrumq.dataplane.v1;
 
+// Unary data-plane RPCs for publish, consume, ACK, and NACK.
+// Streaming consume is intentionally deferred; delivery semantics are owned by
+// the local durable broker behind this adapter.
 service FerrumQDataPlane {
   rpc Publish(PublishRequest) returns (PublishResponse);
   rpc Consume(ConsumeRequest) returns (ConsumeResponse);
@@ -10,15 +13,27 @@ service FerrumQDataPlane {
 }
 
 message PublishRequest {
+  // Required by validation. Must name an existing topic.
   string topic = 1;
+  // Required by validation. FerrumQ currently stores this as message metadata;
+  // producer deduplication is not enforced by this API.
   string message_id = 2;
+  // Optional partition key. Empty string means absent.
   string key = 3;
+  // Opaque payload bytes. Empty payloads are valid.
   bytes payload = 4;
+  // Required by validation.
   string content_type = 5;
+  // Required by validation. Mirrors CloudEvents-style event type metadata.
   string type = 6;
+  // Required by validation. Mirrors CloudEvents-style event source metadata.
   string source = 7;
+  // Optional event subject. Empty string means absent.
   string subject = 8;
+  // Optional metadata only. Empty string means absent. No idempotent publish
+  // deduplication is performed in ferrumq.dataplane.v1.
   string idempotency_key = 9;
+  // Unix timestamp in milliseconds.
   uint64 time_unix_ms = 10;
 }
 
@@ -30,11 +45,18 @@ message PublishResponse {
 }
 
 message ConsumeRequest {
+  // Required by validation. Must name an existing topic.
   string topic = 1;
+  // Required by validation.
   string consumer_group = 2;
+  // Required by validation. Must match ACK/NACK ownership for deliveries.
   string consumer_id = 3;
+  // Required to be greater than zero.
   uint32 max_messages = 4;
+  // Required to be greater than zero. Lease duration in milliseconds.
   uint64 lease_ms = 5;
+  // Caller-supplied Unix timestamp in milliseconds used for deterministic
+  // consume, retry, and lease-expiry decisions.
   uint64 now_unix_ms = 6;
 }
 
@@ -48,31 +70,43 @@ message ConsumedMessage {
   uint32 partition = 3;
   uint64 offset = 4;
   string message_id = 5;
+  // Empty string means the original publish had no partition key.
   string key = 6;
+  // Opaque payload bytes. Empty payloads are valid.
   bytes payload = 7;
   string content_type = 8;
   string type = 9;
   string source = 10;
+  // Empty string means the original publish had no subject.
   string subject = 11;
+  // Empty string means the original publish had no idempotency key.
   string idempotency_key = 12;
+  // Original publish timestamp as Unix milliseconds.
   uint64 time_unix_ms = 13;
   string consumer_group = 14;
   string consumer_id = 15;
   uint32 attempt_number = 16;
+  // Delivery timestamp as Unix milliseconds.
   uint64 delivered_at_unix_ms = 17;
+  // Lease deadline as Unix milliseconds.
   uint64 lease_expires_at_unix_ms = 18;
 }
 
 message AckRequest {
+  // Required by validation.
   string delivery_id = 1;
+  // Required by validation and must own the pending delivery.
   string consumer_id = 2;
 }
 
 message AckResponse {}
 
 message NackRequest {
+  // Required by validation.
   string delivery_id = 1;
+  // Required by validation and must own the pending delivery.
   string consumer_id = 2;
+  // Optional reason. Empty or whitespace-only values use the broker default.
   string reason = 3;
 }
 

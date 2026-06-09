@@ -62,3 +62,19 @@ fn invalid_grpc_listen_address_fails_cleanly() {
     assert!(stderr.contains("invalid value"));
     assert!(stderr.contains("--listen"));
 }
+
+#[test]
+fn serve_grpc_invalid_data_dir_file_fails_cleanly() {
+    let data_dir = tempfile::NamedTempFile::new().unwrap();
+    let output = brokerd()
+        .args(["serve-grpc", "--data-dir"])
+        .arg(data_dir.path())
+        .args(["--listen", "127.0.0.1:0"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("OpenState"));
+    assert!(stderr.contains("AlreadyExists"));
+}

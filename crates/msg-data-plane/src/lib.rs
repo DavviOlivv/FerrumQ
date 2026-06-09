@@ -346,3 +346,70 @@ fn current_unix_millis() -> MessageTimestamp {
         });
     MessageTimestamp::from_unix_millis(millis)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
+
+    use msg_storage::StorageError;
+    use tempfile::TempDir;
+    use tonic::Code;
+
+    use super::*;
+
+    #[test]
+    fn durable_storage_and_corruption_errors_are_sanitized_internal_statuses() {
+        let cases = [
+            DurableBrokerError::Storage(StorageError::InvalidConfig {
+                reason: "specific storage detail".to_owned(),
+            }),
+            DurableBrokerError::StateCorruption {
+                path: PathBuf::from("/tmp/private/events.jsonl"),
+                line: 17,
+                reason: "malformed broker-state line".to_owned(),
+            },
+            DurableBrokerError::Corruption {
+                reason: "duplicate recovered topic event".to_owned(),
+            },
+        ];
+
+        for error in cases {
+            let status = status_from_durable(error);
+            assert_eq!(status.code(), Code::Internal);
+            assert_eq!(status.message(), "internal broker error");
+        }
+    }
+
+    #[test]
+    fn poisoned_broker_state_maps_to_unavailable() {
+        let root = TempDir::new().unwrap();
+        let broker = DurableBroker::open(DurableBrokerConfig::new(
+            root.path(),
+            BrokerConfig::default(),
+            DEFAULT_MAX_SEGMENT_BYTES,
+        ))
+        .unwrap();
+        let shared = Arc::new(Mutex::new(broker));
+        let poison_target = Arc::clone(&shared);
+
+        let _panic = std::thread::spawn(move || {
+            let _guard = poison_target.lock().unwrap();
+            panic!("poison durable broker mutex");
+        })
+        .join();
+
+        let service = DataPlaneService::from_shared(shared);
+        let status = service
+            .with_broker(|_| Ok::<_, DurableBrokerError>(()))
+            .unwrap_err();
+
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(
+            status.message(),
+            "durable broker state is not currently accessible"
+        );
+    }
+}

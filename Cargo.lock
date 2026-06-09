@@ -589,6 +589,7 @@ dependencies = [
  "msg-broker",
  "msg-core",
  "msg-protocol",
+ "msg-storage",
  "tempfile",
  "thiserror",
  "tokio",
@@ -618,6 +619,7 @@ dependencies = [
  "clap",
  "msg-control-api",
  "msg-data-plane",
+ "tempfile",
  "tokio",
  "tonic",
 ]

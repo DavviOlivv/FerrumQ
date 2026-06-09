@@ -31,6 +31,8 @@ The Milestone 6 service is unary-only:
 - `Ack(AckRequest) -> AckResponse`.
 - `Nack(NackRequest) -> NackResponse`.
 
+Publish requests carry message metadata and opaque payload bytes. Empty optional strings mean absent optional metadata. `idempotency_key` is metadata-only in this version and does not trigger broker-side publish deduplication.
+
 Consume requests carry `lease_ms` and `now_unix_ms`. The broker command layer accepts an explicit per-request lease while preserving broker-config leases for older callers.
 
 ## Error Mapping
@@ -47,6 +49,6 @@ Messages must be sanitized and must not include filesystem paths, Rust type name
 
 ## Consequences
 
-The data plane now has a versioned protobuf contract and an executable local gRPC adapter backed by durable broker state. This enables in-process tonic tests and future generated clients without duplicating broker semantics.
+The data plane now has a versioned protobuf contract and an executable local gRPC adapter backed by durable broker state. Delivery remains local durable at-least-once, so consumers must be idempotent. This enables in-process tonic tests and future generated clients without duplicating broker semantics.
 
 The adapter remains deliberately small. It does not implement streaming consume, TypeScript generated clients, auth/RBAC, TLS, rate limiting, observability export, dashboards, clustering, replication, exactly-once semantics, MaaS/multi-tenancy, or production daemon hardening.

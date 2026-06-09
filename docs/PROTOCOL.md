@@ -34,11 +34,11 @@ The service is unary-only:
 - `Ack(AckRequest) -> AckResponse`.
 - `Nack(NackRequest) -> NackResponse`.
 
-`PublishRequest` carries `topic`, `message_id`, `key`, `payload`, `content_type`, `type`, `source`, `subject`, `idempotency_key`, and `time_unix_ms`. Empty `key`, `subject`, and `idempotency_key` mean absent optional metadata. Empty payloads are valid opaque payload bytes.
+`PublishRequest` carries `topic`, `message_id`, `key`, `payload`, `content_type`, `type`, `source`, `subject`, `idempotency_key`, and `time_unix_ms`. `topic`, `message_id`, `content_type`, `type`, and `source` are required by validation. Empty `key`, `subject`, and `idempotency_key` mean absent optional metadata. Empty payloads are valid opaque payload bytes. `time_unix_ms` is a Unix timestamp in milliseconds. `idempotency_key` is metadata-only in `ferrumq.dataplane.v1`; the adapter does not deduplicate publishes by key.
 
-`ConsumeRequest` carries `topic`, `consumer_group`, `consumer_id`, `max_messages`, `lease_ms`, and `now_unix_ms`. `max_messages` and `lease_ms` must be greater than zero. Consume responses include delivery ID, topic, partition, offset, envelope metadata, consumer ownership, attempt number, delivery timestamp, and lease deadline.
+`ConsumeRequest` carries `topic`, `consumer_group`, `consumer_id`, `max_messages`, `lease_ms`, and `now_unix_ms`. `topic`, `consumer_group`, and `consumer_id` are required by validation. `max_messages` and `lease_ms` must be greater than zero. `now_unix_ms` is a caller-supplied Unix millisecond timestamp used for deterministic consume, retry, and lease-expiry decisions. Consume responses include delivery ID, topic, partition, offset, envelope metadata, consumer ownership, attempt number, delivery timestamp, and lease deadline.
 
-`AckRequest` carries `delivery_id` and `consumer_id`. `NackRequest` carries `delivery_id`, `consumer_id`, and optional `reason`.
+`AckRequest` carries required `delivery_id` and `consumer_id` strings. `NackRequest` carries required `delivery_id` and `consumer_id` strings plus optional `reason`; empty or whitespace-only reasons use the broker default.
 
 ## Versioning Strategy
 
@@ -49,6 +49,7 @@ Protocol versions should be explicit in API paths, protobuf packages, or schema 
 - Unknown fields should not change broker behavior unless a version says they do.
 - Message IDs must remain stable across retries and redeliveries.
 - Ordering guarantees apply only within a topic partition.
+- Delivery is local durable at-least-once; consumers must be idempotent.
 - Exactly-once delivery is not part of the initial contract.
 
 ## Error Contract Direction

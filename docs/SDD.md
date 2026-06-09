@@ -22,7 +22,7 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No HTTP/gRPC API, CLI/TUI broker semantics, clustering, replication, consensus, or exactly-once behavior in Milestone 4.
 - No HTTP publish, consume, ACK, or NACK endpoints in Milestone 5.
 - No auth/RBAC, TLS, rate limiting, clustering, replication, consensus, or daemonization in Milestone 5.
-- No streaming consume, generated TypeScript gRPC clients, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, or daemonization in Milestone 6.
+- No streaming consume, generated TypeScript gRPC clients, SDK integration, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, exactly-once semantics, or daemonization in Milestone 6.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
 
@@ -70,7 +70,7 @@ A message exceeding max delivery attempts moves to the DLQ for that consumer gro
 
 ## 14. Idempotency and Deduplication
 
-At-least-once delivery allows duplicates. Milestone 1 models message IDs and idempotency keys as validated values. Deduplication windows and producer/consumer behavior remain future work.
+At-least-once delivery allows duplicates. Milestone 1 models message IDs and idempotency keys as validated values. Milestone 6 carries `idempotency_key` through the gRPC data plane as metadata only; it does not enforce producer deduplication. Deduplication windows and producer/consumer behavior remain future work.
 
 ## 15. Backpressure Model
 
@@ -116,7 +116,7 @@ The data plane handles publish, consume, ACK, and NACK. Milestone 6 implements t
 - `Ack(AckRequest) -> AckResponse`.
 - `Nack(NackRequest) -> NackResponse`.
 
-`msg-data-plane` owns explicit protobuf-to-domain mapping, keeps `DurableBroker` behind `Arc<Mutex<_>>`, calls public broker APIs only, and returns sanitized gRPC statuses. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and stale deliveries map to `NOT_FOUND`; wrong delivery ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if encountered; poisoned broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected broker failures map to `INTERNAL`.
+`msg-data-plane` owns explicit protobuf-to-domain mapping, keeps `DurableBroker` behind `Arc<Mutex<_>>`, calls public broker APIs only, and returns sanitized gRPC statuses. Delivery is local durable at-least-once; consumers must be idempotent. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and unknown, duplicate, or stale deliveries map to `NOT_FOUND`; wrong delivery ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if encountered; poisoned broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected broker failures map to `INTERNAL`.
 
 ## 20. Observability
 
