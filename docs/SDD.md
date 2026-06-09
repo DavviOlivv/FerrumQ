@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`.
 
 ## 1. Product Vision
 
@@ -22,6 +22,7 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No HTTP/gRPC API, CLI/TUI broker semantics, clustering, replication, consensus, or exactly-once behavior in Milestone 4.
 - No HTTP publish, consume, ACK, or NACK endpoints in Milestone 5.
 - No auth/RBAC, TLS, rate limiting, clustering, replication, consensus, or daemonization in Milestone 5.
+- No streaming consume, generated TypeScript gRPC clients, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, or daemonization in Milestone 6.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
 
@@ -37,7 +38,7 @@ Important identifiers use strong newtypes instead of raw strings or integers. Co
 
 ## 6. Message Envelope
 
-Messages use a CloudEvents-inspired envelope with stable metadata: ID, source, type, optional subject, time, content type, headers, optional partition key, optional idempotency key, and opaque payload bytes. Milestone 1 implements the in-memory domain representation and builder-style construction. Full CloudEvents compatibility and external protocol DTOs are future work.
+Messages use a CloudEvents-inspired envelope with stable metadata: ID, source, type, optional subject, time, content type, headers, optional partition key, optional idempotency key, and opaque payload bytes. Milestone 1 implements the in-memory domain representation and builder-style construction. Milestone 6 exposes the core data-plane subset over protobuf fields named `topic`, `message_id`, `key`, `payload`, `content_type`, `type`, `source`, `subject`, `idempotency_key`, and `time_unix_ms`. Full CloudEvents compatibility remains future work.
 
 ## 7. Topics, Partitions, Offsets
 
@@ -53,7 +54,7 @@ Milestone 2 publish flow validates the topic exists, selects a partition determi
 
 ## 10. Consume Flow
 
-Milestone 2 consume flow scans partitions in stable partition-id order and offsets in ascending order within each partition. A consumed message becomes pending for that consumer group with a deterministic delivery ID, attempt number, delivered-at timestamp, and lease expiry timestamp. Pending, retry-scheduled, ACKed, and DLQ messages are not returned by normal consume. Milestone 4 persists durable consume batches before exposing deliveries to callers.
+Milestone 2 consume flow scans partitions in stable partition-id order and offsets in ascending order within each partition. A consumed message becomes pending for that consumer group with a deterministic delivery ID, attempt number, delivered-at timestamp, and lease expiry timestamp. Pending, retry-scheduled, ACKed, and DLQ messages are not returned by normal consume. Milestone 4 persists durable consume batches before exposing deliveries to callers. Milestone 6 makes consume leases explicit per gRPC request through `lease_ms`; existing broker callers without an explicit lease continue to use broker configuration.
 
 ## 11. ACK/NACK Flow
 
@@ -106,7 +107,16 @@ The control plane manages topics, partition inspection, consumer group inspectio
 
 ## 19. Data Plane
 
-The data plane handles publish, consume, ACK, and NACK. gRPC with `tonic` and `prost` is planned for later data plane APIs. Milestone 5 deliberately keeps HTTP data-plane endpoints out of scope.
+The data plane handles publish, consume, ACK, and NACK. Milestone 6 implements the first data-plane adapter in `msg-data-plane` using tonic/prost and protobuf contracts generated from `crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto`.
+
+`brokerd serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090` opens a local `DurableBroker` and serves `ferrumq.dataplane.v1.FerrumQDataPlane`. The service is unary-only:
+
+- `Publish(PublishRequest) -> PublishResponse`.
+- `Consume(ConsumeRequest) -> ConsumeResponse`.
+- `Ack(AckRequest) -> AckResponse`.
+- `Nack(NackRequest) -> NackResponse`.
+
+`msg-data-plane` owns explicit protobuf-to-domain mapping, keeps `DurableBroker` behind `Arc<Mutex<_>>`, calls public broker APIs only, and returns sanitized gRPC statuses. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and stale deliveries map to `NOT_FOUND`; wrong delivery ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if encountered; poisoned broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected broker failures map to `INTERNAL`.
 
 ## 20. Observability
 
@@ -118,7 +128,7 @@ Early milestones assume local development. Authentication, authorization, multi-
 
 ## 22. Testing Strategy Summary
 
-The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
+The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Milestone 6 adds protocol generation/exposure tests, in-process tonic service tests for publish/consume/ACK/NACK and durability, and runtime smoke tests for `serve-grpc`. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
 
 ## 23. Milestone Roadmap
 

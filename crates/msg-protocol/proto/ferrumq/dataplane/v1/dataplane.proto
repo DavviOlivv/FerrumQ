@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package ferrumq.dataplane.v1;
+
+service FerrumQDataPlane {
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  rpc Consume(ConsumeRequest) returns (ConsumeResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Nack(NackRequest) returns (NackResponse);
+}
+
+message PublishRequest {
+  string topic = 1;
+  string message_id = 2;
+  string key = 3;
+  bytes payload = 4;
+  string content_type = 5;
+  string type = 6;
+  string source = 7;
+  string subject = 8;
+  string idempotency_key = 9;
+  uint64 time_unix_ms = 10;
+}
+
+message PublishResponse {
+  string topic = 1;
+  uint32 partition = 2;
+  uint64 offset = 3;
+  string message_id = 4;
+}
+
+message ConsumeRequest {
+  string topic = 1;
+  string consumer_group = 2;
+  string consumer_id = 3;
+  uint32 max_messages = 4;
+  uint64 lease_ms = 5;
+  uint64 now_unix_ms = 6;
+}
+
+message ConsumeResponse {
+  repeated ConsumedMessage messages = 1;
+}
+
+message ConsumedMessage {
+  string delivery_id = 1;
+  string topic = 2;
+  uint32 partition = 3;
+  uint64 offset = 4;
+  string message_id = 5;
+  string key = 6;
+  bytes payload = 7;
+  string content_type = 8;
+  string type = 9;
+  string source = 10;
+  string subject = 11;
+  string idempotency_key = 12;
+  uint64 time_unix_ms = 13;
+  string consumer_group = 14;
+  string consumer_id = 15;
+  uint32 attempt_number = 16;
+  uint64 delivered_at_unix_ms = 17;
+  uint64 lease_expires_at_unix_ms = 18;
+}
+
+message AckRequest {
+  string delivery_id = 1;
+  string consumer_id = 2;
+}
+
+message AckResponse {}
+
+message NackRequest {
+  string delivery_id = 1;
+  string consumer_id = 2;
+  string reason = 3;
+}
+
+message NackResponse {}

@@ -1,0 +1,20 @@
+[package]
+name = "msg-data-plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+msg-broker = { path = "../msg-broker" }
+msg-core = { path = "../msg-core" }
+msg-protocol = { path = "../msg-protocol" }
+thiserror = "2"
+tonic.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

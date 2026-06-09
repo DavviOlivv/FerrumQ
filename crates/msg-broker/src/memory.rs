@@ -71,6 +71,7 @@ impl InMemoryBrokerState {
         &mut self,
         command: ConsumeCommand,
         delivery_lease_millis: u64,
+        lease_field: &'static str,
     ) -> BrokerResult<Vec<ConsumedMessage>> {
         let topic_name = command.topic().clone();
         let stored_topic =
@@ -143,11 +144,8 @@ impl InMemoryBrokerState {
                 offset,
                 attempt_number,
             )?;
-            let lease_expires_at = add_millis(
-                command.timestamp(),
-                delivery_lease_millis,
-                "delivery_lease_millis",
-            )?;
+            let lease_expires_at =
+                add_millis(command.timestamp(), delivery_lease_millis, lease_field)?;
             let message_ref = MessageRef::new(topic_name.clone(), partition_id, offset);
 
             partition_state

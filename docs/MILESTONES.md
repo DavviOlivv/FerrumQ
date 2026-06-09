@@ -162,9 +162,30 @@ Deferred from Milestone 5:
 
 - gRPC with tonic/prost.
 - Publish RPC.
-- Consume stream.
+- Unary consume RPC.
 - ACK/NACK RPC.
-- Rust client.
+- Runtime wiring.
+
+Status: implemented as a local unary gRPC data-plane foundation in `crates/msg-protocol`, `crates/msg-data-plane`, and `brokerd serve-grpc`.
+
+Implemented scope:
+
+- Protobuf contract at `crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto` with package `ferrumq.dataplane.v1`.
+- Generated tonic/prost Rust DTOs, client, and server trait exposed from `msg-protocol`.
+- `FerrumQDataPlane` unary `Publish`, `Consume`, `Ack`, and `Nack` RPCs.
+- Explicit publish fields for topic, message ID, key, payload, content type, type, source, subject, idempotency key, and Unix-millisecond time.
+- Explicit consume fields for topic, consumer group, consumer ID, max messages, lease milliseconds, and Unix-millisecond now.
+- Explicit ACK/NACK delivery ownership fields through delivery ID and consumer ID, plus optional NACK reason.
+- Per-request consume lease support in `ConsumeCommand`, with existing broker-config leases preserved for older callers.
+- `msg-data-plane` adapter backed by `Arc<Mutex<DurableBroker>>`, explicit protobuf-to-domain mapping, public broker API calls only, and sanitized gRPC status mapping.
+- `brokerd serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090` runtime wiring, while `brokerd --version` and `brokerd serve` remain unchanged.
+- Protocol exposure tests, in-process tonic adapter tests for publish, consume, ACK, NACK, retry/DLQ, and durable reopen flows, and runtime smoke tests for the gRPC subcommand.
+
+Deferred from Milestone 6:
+
+- Streaming consume.
+- Generated TypeScript clients and SDK integration.
+- Auth/RBAC, TLS, rate limiting, observability export, dashboards, clustering, replication, consensus, exactly-once semantics, MaaS/multi-tenancy, background workers, and production daemon hardening.
 
 ## Milestone 7: TypeScript CLI
 

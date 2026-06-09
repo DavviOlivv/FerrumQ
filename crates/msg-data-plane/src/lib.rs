@@ -1,0 +1,348 @@
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use msg_broker::{
+    AckCommand, BrokerConfig, BrokerError, ConsumeCommand, DurableBroker, DurableBrokerConfig,
+    DurableBrokerError, NackCommand, PublishCommand,
+};
+use msg_core::{
+    ConsumerGroupId, ConsumerId, ContentType, DeliveryId, EventSource, EventSubject, EventType,
+    IdempotencyKey, MessageEnvelope, MessageId, MessagePayload, MessageTimestamp, PartitionKey,
+    TopicName,
+};
+use msg_protocol::ferrumq::dataplane::v1::{
+    AckRequest, AckResponse, ConsumeRequest, ConsumeResponse, ConsumedMessage, NackRequest,
+    NackResponse, PublishRequest, PublishResponse, ferrum_q_data_plane_server::FerrumQDataPlane,
+};
+use thiserror::Error;
+use tonic::{Request, Response, Status};
+
+pub use msg_protocol::ferrumq::dataplane::v1::ferrum_q_data_plane_server::FerrumQDataPlaneServer;
+
+const DEFAULT_MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Configuration for the local gRPC data-plane API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataPlaneConfig {
+    pub data_dir: PathBuf,
+}
+
+impl DataPlaneConfig {
+    #[must_use]
+    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+        }
+    }
+}
+
+/// Errors raised while opening data-plane state.
+#[derive(Debug, Error)]
+pub enum DataPlaneError {
+    #[error("failed to open durable broker state")]
+    OpenState(#[source] DurableBrokerError),
+}
+
+/// gRPC adapter for the synchronous durable broker.
+#[derive(Debug, Clone)]
+pub struct DataPlaneService {
+    broker: Arc<Mutex<DurableBroker>>,
+}
+
+impl DataPlaneService {
+    #[must_use]
+    pub fn new(broker: DurableBroker) -> Self {
+        Self {
+            broker: Arc::new(Mutex::new(broker)),
+        }
+    }
+
+    #[must_use]
+    pub fn from_shared(broker: Arc<Mutex<DurableBroker>>) -> Self {
+        Self { broker }
+    }
+
+    #[must_use]
+    pub fn broker(&self) -> Arc<Mutex<DurableBroker>> {
+        Arc::clone(&self.broker)
+    }
+
+    fn with_broker<T>(
+        &self,
+        operation: impl FnOnce(&mut DurableBroker) -> Result<T, DurableBrokerError>,
+    ) -> Result<T, Status> {
+        let mut broker = self
+            .broker
+            .lock()
+            .map_err(|_| Status::unavailable("durable broker state is not currently accessible"))?;
+        operation(&mut broker).map_err(status_from_durable)
+    }
+}
+
+/// Opens the durable broker backing state for the gRPC data-plane API.
+pub fn open_service(config: DataPlaneConfig) -> Result<DataPlaneService, DataPlaneError> {
+    let broker = DurableBroker::open(DurableBrokerConfig::new(
+        config.data_dir,
+        BrokerConfig::default(),
+        DEFAULT_MAX_SEGMENT_BYTES,
+    ))
+    .map_err(DataPlaneError::OpenState)?;
+
+    Ok(DataPlaneService::new(broker))
+}
+
+#[tonic::async_trait]
+impl FerrumQDataPlane for DataPlaneService {
+    async fn publish(
+        &self,
+        request: Request<PublishRequest>,
+    ) -> Result<Response<PublishResponse>, Status> {
+        let request = request.into_inner();
+        let topic = topic_name(&request.topic)?;
+        let envelope = publish_envelope(request)?;
+
+        let published =
+            self.with_broker(|broker| broker.publish(PublishCommand::new(topic, envelope)))?;
+
+        Ok(Response::new(PublishResponse {
+            topic: published.topic().as_str().to_owned(),
+            partition: published.partition_id().value(),
+            offset: published.offset().value(),
+            message_id: published.message_id().as_str().to_owned(),
+        }))
+    }
+
+    async fn consume(
+        &self,
+        request: Request<ConsumeRequest>,
+    ) -> Result<Response<ConsumeResponse>, Status> {
+        let request = request.into_inner();
+        let topic = topic_name(&request.topic)?;
+        let consumer_group_id = consumer_group_id(&request.consumer_group)?;
+        let consumer_id = consumer_id(&request.consumer_id)?;
+        let max_messages = max_messages(request.max_messages)?;
+        let lease_ms = lease_ms(request.lease_ms)?;
+        let now = MessageTimestamp::from_unix_millis(request.now_unix_ms);
+        let command = ConsumeCommand::with_lease_millis(
+            topic,
+            consumer_group_id,
+            consumer_id,
+            max_messages,
+            now,
+            lease_ms,
+        )
+        .map_err(status_from_broker)?;
+
+        let topic_for_check = command.topic().clone();
+        let messages = self.with_broker(|broker| {
+            broker.get_topic(&topic_for_check)?;
+            broker.retry_ready(now)?;
+            broker.consume(command)
+        })?;
+
+        Ok(Response::new(ConsumeResponse {
+            messages: messages.into_iter().map(consumed_message).collect(),
+        }))
+    }
+
+    async fn ack(&self, request: Request<AckRequest>) -> Result<Response<AckResponse>, Status> {
+        let request = request.into_inner();
+        let delivery_id = delivery_id(&request.delivery_id)?;
+        let consumer_id = consumer_id(&request.consumer_id)?;
+        let timestamp = current_unix_millis();
+
+        self.with_broker(|broker| {
+            broker.ack(AckCommand::new(delivery_id, consumer_id, timestamp))
+        })?;
+
+        Ok(Response::new(AckResponse {}))
+    }
+
+    async fn nack(&self, request: Request<NackRequest>) -> Result<Response<NackResponse>, Status> {
+        let request = request.into_inner();
+        let delivery_id = delivery_id(&request.delivery_id)?;
+        let consumer_id = consumer_id(&request.consumer_id)?;
+        let timestamp = current_unix_millis();
+        let command = if request.reason.trim().is_empty() {
+            NackCommand::new(delivery_id, consumer_id, timestamp)
+        } else {
+            NackCommand::with_reason(delivery_id, consumer_id, request.reason, timestamp)
+        };
+
+        self.with_broker(|broker| broker.nack(command))?;
+
+        Ok(Response::new(NackResponse {}))
+    }
+}
+
+fn publish_envelope(request: PublishRequest) -> Result<MessageEnvelope, Status> {
+    let id = message_id(&request.message_id)?;
+    let source = event_source(&request.source)?;
+    let event_type = event_type(&request.r#type)?;
+    let content_type = content_type(&request.content_type)?;
+    let timestamp = MessageTimestamp::from_unix_millis(request.time_unix_ms);
+    let payload = MessagePayload::from_bytes(request.payload);
+
+    let mut builder =
+        MessageEnvelope::builder(id, source, event_type, content_type, timestamp, payload);
+
+    if let Some(subject) = optional_subject(&request.subject)? {
+        builder = builder.subject(subject);
+    }
+    if let Some(key) = optional_partition_key(&request.key)? {
+        builder = builder.partition_key(key);
+    }
+    if let Some(idempotency_key) = optional_idempotency_key(&request.idempotency_key)? {
+        builder = builder.idempotency_key(idempotency_key);
+    }
+
+    Ok(builder.build())
+}
+
+fn consumed_message(message: msg_broker::ConsumedMessage) -> ConsumedMessage {
+    let envelope = message.envelope();
+
+    ConsumedMessage {
+        delivery_id: message.delivery_id().as_str().to_owned(),
+        topic: message.topic().as_str().to_owned(),
+        partition: message.partition_id().value(),
+        offset: message.offset().value(),
+        message_id: envelope.id().as_str().to_owned(),
+        key: envelope
+            .partition_key()
+            .map_or_else(String::new, |key| key.as_str().to_owned()),
+        payload: envelope.payload().as_bytes().to_vec(),
+        content_type: envelope.content_type().as_str().to_owned(),
+        r#type: envelope.event_type().as_str().to_owned(),
+        source: envelope.source().as_str().to_owned(),
+        subject: envelope
+            .subject()
+            .map_or_else(String::new, |subject| subject.as_str().to_owned()),
+        idempotency_key: envelope
+            .idempotency_key()
+            .map_or_else(String::new, |key| key.as_str().to_owned()),
+        time_unix_ms: envelope.timestamp().as_unix_millis(),
+        consumer_group: message.consumer_group_id().as_str().to_owned(),
+        consumer_id: message.consumer_id().as_str().to_owned(),
+        attempt_number: message.attempt_number(),
+        delivered_at_unix_ms: message.delivered_at().as_unix_millis(),
+        lease_expires_at_unix_ms: message.lease_expires_at().as_unix_millis(),
+    }
+}
+
+fn topic_name(value: &str) -> Result<TopicName, Status> {
+    TopicName::new(value).map_err(invalid_argument)
+}
+
+fn message_id(value: &str) -> Result<MessageId, Status> {
+    MessageId::new(value).map_err(invalid_argument)
+}
+
+fn event_source(value: &str) -> Result<EventSource, Status> {
+    EventSource::new(value).map_err(invalid_argument)
+}
+
+fn event_type(value: &str) -> Result<EventType, Status> {
+    EventType::new(value).map_err(invalid_argument)
+}
+
+fn content_type(value: &str) -> Result<ContentType, Status> {
+    ContentType::new(value).map_err(invalid_argument)
+}
+
+fn consumer_group_id(value: &str) -> Result<ConsumerGroupId, Status> {
+    ConsumerGroupId::new(value).map_err(invalid_argument)
+}
+
+fn consumer_id(value: &str) -> Result<ConsumerId, Status> {
+    ConsumerId::new(value).map_err(invalid_argument)
+}
+
+fn delivery_id(value: &str) -> Result<DeliveryId, Status> {
+    DeliveryId::new(value).map_err(invalid_argument)
+}
+
+fn optional_partition_key(value: &str) -> Result<Option<PartitionKey>, Status> {
+    optional(value, |value| PartitionKey::new(value))
+}
+
+fn optional_subject(value: &str) -> Result<Option<EventSubject>, Status> {
+    optional(value, |value| EventSubject::new(value))
+}
+
+fn optional_idempotency_key(value: &str) -> Result<Option<IdempotencyKey>, Status> {
+    optional(value, |value| IdempotencyKey::new(value))
+}
+
+fn optional<T>(
+    value: &str,
+    parse: impl FnOnce(&str) -> Result<T, msg_core::DomainError>,
+) -> Result<Option<T>, Status> {
+    if value.trim().is_empty() {
+        Ok(None)
+    } else {
+        parse(value).map(Some).map_err(invalid_argument)
+    }
+}
+
+fn max_messages(value: u32) -> Result<usize, Status> {
+    if value == 0 {
+        return Err(Status::invalid_argument(
+            "max_messages must be greater than zero",
+        ));
+    }
+
+    Ok(value as usize)
+}
+
+fn lease_ms(value: u64) -> Result<u64, Status> {
+    if value == 0 {
+        return Err(Status::invalid_argument(
+            "lease_ms must be greater than zero",
+        ));
+    }
+
+    Ok(value)
+}
+
+fn invalid_argument(error: msg_core::DomainError) -> Status {
+    Status::invalid_argument(error.to_string())
+}
+
+fn status_from_durable(error: DurableBrokerError) -> Status {
+    match error {
+        DurableBrokerError::Broker(error) => status_from_broker(error),
+        DurableBrokerError::Storage(_)
+        | DurableBrokerError::Io(_)
+        | DurableBrokerError::Serde(_)
+        | DurableBrokerError::StateCorruption { .. }
+        | DurableBrokerError::Corruption { .. } => Status::internal("internal broker error"),
+    }
+}
+
+fn status_from_broker(error: BrokerError) -> Status {
+    match error {
+        BrokerError::Domain(error) => Status::invalid_argument(error.to_string()),
+        BrokerError::TopicAlreadyExists { .. } => Status::already_exists("topic already exists"),
+        BrokerError::TopicNotFound { .. } => Status::not_found("topic not found"),
+        BrokerError::DeliveryNotFound { .. } => Status::not_found("delivery not found"),
+        BrokerError::InvalidConsumer { .. } => {
+            Status::failed_precondition("invalid delivery ownership")
+        }
+        BrokerError::InvalidConfig { field, reason } => {
+            Status::invalid_argument(format!("{field} {reason}"))
+        }
+    }
+}
+
+fn current_unix_millis() -> MessageTimestamp {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        });
+    MessageTimestamp::from_unix_millis(millis)
+}

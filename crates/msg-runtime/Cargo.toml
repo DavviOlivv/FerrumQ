@@ -9,7 +9,9 @@ license.workspace = true
 axum = "0.8"
 clap.workspace = true
 msg-control-api = { path = "../msg-control-api" }
+msg-data-plane = { path = "../msg-data-plane" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tonic = { workspace = true, features = ["transport"] }
 
 [lib]
 path = "src/lib.rs"

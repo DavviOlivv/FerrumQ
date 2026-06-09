@@ -12,10 +12,18 @@ Milestone 4 adds `DurableBroker` in `msg-broker` as a local durable at-least-onc
 
 Milestone 5 adds `msg-control-api`, an Axum HTTP control-plane adapter backed by local durable `DurableBroker` state, and wires `brokerd serve`. The API exposes health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection only. It intentionally does not expose HTTP publish, consume, ACK, or NACK data-plane endpoints. Endpoint shapes, deterministic topic ordering, duplicate topic behavior, unsupported route/method behavior, readiness semantics, and stable JSON error envelopes are documented in [docs/API.md](docs/API.md).
 
+Milestone 6 adds a unary gRPC data-plane foundation. Protobuf contracts live in `msg-protocol` under `ferrumq.dataplane.v1`, `msg-data-plane` maps those DTOs to public `DurableBroker` publish, consume, ACK, and NACK APIs, and `brokerd serve-grpc` serves the adapter from local durable state. Streaming consume, generated TypeScript clients, auth, TLS, rate limiting, and distributed broker behavior remain deferred.
+
 Start the local control-plane server:
 
 ```sh
 cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
+```
+
+Start the local data-plane gRPC server:
+
+```sh
+cargo run -p msg-runtime --bin brokerd -- serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090
 ```
 
 ## Architecture Direction

@@ -667,11 +667,18 @@ impl DurableBroker {
                     record.offset,
                     attempt_number,
                 )?;
-                let lease_expires_at = add_millis(
-                    command.timestamp(),
-                    self.config.broker_config.delivery_lease_millis(),
-                    "delivery_lease_millis",
-                )?;
+                let (delivery_lease_millis, lease_field) =
+                    command.delivery_lease_millis().map_or_else(
+                        || {
+                            (
+                                self.config.broker_config.delivery_lease_millis(),
+                                "delivery_lease_millis",
+                            )
+                        },
+                        |lease_millis| (lease_millis, "lease_ms"),
+                    );
+                let lease_expires_at =
+                    add_millis(command.timestamp(), delivery_lease_millis, lease_field)?;
                 let event = DeliveryEvent {
                     delivery_id: delivery_id.clone(),
                     consumer_id: command.consumer_id().clone(),

@@ -81,8 +81,12 @@ impl BrokerService {
     }
 
     pub fn consume(&mut self, command: ConsumeCommand) -> BrokerResult<Vec<ConsumedMessage>> {
+        let (delivery_lease_millis, lease_field) = command.delivery_lease_millis().map_or_else(
+            || (self.config.delivery_lease_millis(), "delivery_lease_millis"),
+            |lease_millis| (lease_millis, "lease_ms"),
+        );
         self.state
-            .consume(command, self.config.delivery_lease_millis())
+            .consume(command, delivery_lease_millis, lease_field)
     }
 
     pub fn ack(&mut self, command: AckCommand) -> BrokerResult<()> {

@@ -9,11 +9,12 @@ The initial system is intentionally not split into microservices. Broker behavio
 The monolith is modular through crate boundaries:
 
 - `msg-core`: pure domain types and invariants. Milestone 1 implements validated core newtypes, message envelopes, topics, partitions, consumer groups, subscriptions, delivery attempts, ACK/NACK commands, retry policy values, dead-letter reason values, typed domain errors, and serde support here.
-- `msg-protocol`: shared protocol DTOs and serialization boundaries.
+- `msg-protocol`: shared protocol DTOs and serialization boundaries. Milestone 6 adds protobuf definitions and generated tonic/prost Rust types for `ferrumq.dataplane.v1`.
 - `msg-storage`: local durable storage adapter/foundation. Milestone 3 implements a synchronous segment-backed append-only log per topic partition with framed JSON message records, CRC32 checksums, zero-based gapless offset assignment for successful appends, segment rolling, reopen recovery, and final-segment trailing-record repair.
 - `msg-broker`: broker orchestration and delivery flow. Milestone 2 implements `BrokerService` as synchronous deterministic in-memory state with topic creation, publish, consume, ACK, NACK, retry maintenance, lease expiry, and in-memory DLQ. Milestone 4 adds `DurableBroker`, a synchronous local durable broker that uses `msg-storage` for message records and a JSONL broker-state log for topic metadata and delivery transitions.
-- `msg-runtime`: daemon entrypoints, configuration, and runtime wiring. Milestone 5 wires `brokerd serve` to the local control-plane HTTP router.
+- `msg-runtime`: daemon entrypoints, configuration, and runtime wiring. Milestone 5 wires `brokerd serve` to the local control-plane HTTP router. Milestone 6 wires `brokerd serve-grpc` to the local data-plane gRPC service.
 - `msg-control-api`: Axum control plane adapter. Milestone 5 implements health, readiness, status, topic admin, topic inspection, and DLQ inspection endpoints backed by `DurableBroker`.
+- `msg-data-plane`: tonic gRPC data-plane adapter. Milestone 6 implements unary publish, consume, ACK, and NACK RPCs backed by `DurableBroker`.
 - `msg-observability`: tracing, metrics, and telemetry helpers.
 - `msg-test-harness`: deterministic test and failure-simulation helpers.
 
@@ -28,6 +29,8 @@ Milestone 3 keeps durable storage independent from broker orchestration. `msg-st
 Milestone 4 keeps `BrokerService` unchanged and adds `DurableBroker` as a separate public API. Durable message records live under `<root>/messages` through `msg-storage::PartitionLog`; durable topic and delivery state lives under `<root>/broker-state/events.jsonl` as append-only compact JSONL events. Successfully published messages are recoverable after reopen, successfully ACKed messages are not redelivered after reopen, unACKed in-flight deliveries may be redelivered after reopen, and duplicate or stale delivery IDs fail as not found. The broker-state format is specified in [BROKER_STATE_FORMAT.md](BROKER_STATE_FORMAT.md). This is local filesystem durability only, not replicated cluster durability. There is still no HTTP/gRPC API, CLI/TUI broker behavior, clustering, replication, consensus, or exactly-once delivery.
 
 Milestone 5 adds an HTTP adapter without changing broker semantics. `msg-control-api` owns Axum routing, DTOs, deterministic JSON response shapes, unsupported route/method fallbacks, and public error envelopes; `msg-runtime` owns process entrypoints and the TCP listener. The adapter opens a local `DurableBroker` from a configured data directory and stores it behind shared application state for synchronous control-plane calls. It exposes only health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection. HTTP publish, consume, ACK, and NACK are not implemented in Milestone 5.
+
+Milestone 6 adds a gRPC data-plane adapter without moving broker semantics into the protocol layer. `msg-protocol` owns protobuf contracts and generated Rust service/types, while `msg-data-plane` owns protobuf-to-domain mapping, mutex-backed access to the synchronous `DurableBroker`, and sanitized gRPC status mapping. The adapter calls public broker APIs only. Consume remains unary and explicitly carries `max_messages`, `lease_ms`, and `now_unix_ms`; streaming consumption and background retry workers remain deferred.
 
 Planned dependency direction:
 
@@ -45,7 +48,9 @@ TypeScript packages must not become an alternate broker implementation. They pre
 
 The control plane manages topics, partitions, consumer groups, DLQ inspection, health, readiness, and configuration visibility. The data plane handles publish, consume, ACK, and NACK. Separating the two avoids mixing admin operations with latency-sensitive message flow.
 
-Milestone 5 implements the first control-plane adapter with Axum and local durable backing state. It uses explicit JSON DTOs and a stable error envelope, including `409 Conflict` for duplicate topic creation, `404` for valid unknown topics, `503` when broker state is unavailable, and JSON-envelope responses for unknown routes or unsupported methods. Data-plane adapters remain deferred.
+Milestone 5 implements the first control-plane adapter with Axum and local durable backing state. It uses explicit JSON DTOs and a stable error envelope, including `409 Conflict` for duplicate topic creation, `404` for valid unknown topics, `503` when broker state is unavailable, and JSON-envelope responses for unknown routes or unsupported methods.
+
+Milestone 6 implements the first data-plane adapter with tonic/prost and the local durable broker. The gRPC service exposes unary `Publish`, `Consume`, `Ack`, and `Nack` calls. It maps validation failures to `INVALID_ARGUMENT`, unknown topics and stale deliveries to `NOT_FOUND`, invalid delivery ownership to `FAILED_PRECONDITION`, duplicate topics to `ALREADY_EXISTS` if surfaced through broker APIs, unavailable broker state to `UNAVAILABLE`, and storage/corruption/unexpected failures to sanitized `INTERNAL` statuses.
 
 ## Future Distributed Evolution
 

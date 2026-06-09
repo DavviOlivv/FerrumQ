@@ -3,6 +3,8 @@ use msg_core::{
     TopicName,
 };
 
+use crate::errors::{BrokerError, BrokerResult};
+
 /// Create a topic with the validated name and topic configuration from `msg-core`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTopicCommand {
@@ -63,6 +65,7 @@ pub struct ConsumeCommand {
     consumer_id: ConsumerId,
     max_messages: usize,
     timestamp: MessageTimestamp,
+    delivery_lease_millis: Option<u64>,
 }
 
 impl ConsumeCommand {
@@ -80,7 +83,33 @@ impl ConsumeCommand {
             consumer_id,
             max_messages,
             timestamp,
+            delivery_lease_millis: None,
         }
+    }
+
+    pub fn with_lease_millis(
+        topic: TopicName,
+        consumer_group_id: ConsumerGroupId,
+        consumer_id: ConsumerId,
+        max_messages: usize,
+        timestamp: MessageTimestamp,
+        delivery_lease_millis: u64,
+    ) -> BrokerResult<Self> {
+        if delivery_lease_millis == 0 {
+            return Err(BrokerError::InvalidConfig {
+                field: "lease_ms",
+                reason: "must be greater than zero",
+            });
+        }
+
+        Ok(Self {
+            topic,
+            consumer_group_id,
+            consumer_id,
+            max_messages,
+            timestamp,
+            delivery_lease_millis: Some(delivery_lease_millis),
+        })
     }
 
     #[must_use]
@@ -106,6 +135,11 @@ impl ConsumeCommand {
     #[must_use]
     pub fn timestamp(&self) -> MessageTimestamp {
         self.timestamp
+    }
+
+    #[must_use]
+    pub fn delivery_lease_millis(&self) -> Option<u64> {
+        self.delivery_lease_millis
     }
 }
 

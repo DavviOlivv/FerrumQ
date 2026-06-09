@@ -3,6 +3,7 @@ members = [
     "crates/msg-broker",
     "crates/msg-control-api",
     "crates/msg-core",
+    "crates/msg-data-plane",
     "crates/msg-observability",
     "crates/msg-protocol",
     "crates/msg-runtime",
@@ -19,3 +20,6 @@ license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
