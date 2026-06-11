@@ -16,6 +16,8 @@ Milestone 6 adds a unary gRPC data-plane foundation while HTTP remains control-p
 
 Milestone 7 adds the first usable TypeScript CLI. The binary is `ferrumq`, with `msg` kept as a compatibility alias. The CLI is an adapter only: HTTP for control-plane commands and unary gRPC for publish, consume, ACK, and NACK. Rust remains the source of broker behavior. CLI usage, defaults, JSON output wrappers, and deferred process-management scope are documented in [docs/CLI.md](docs/CLI.md). Streaming consume, generated public SDKs, auth, TLS, rate limiting, clustering, replication, exactly-once semantics, MaaS/multi-tenancy, and distributed broker behavior remain deferred.
 
+Milestone 8 adds the first usable TypeScript TUI. The binary is `ferrumq-tui`, implemented with Ink as a read-only dashboard over the HTTP control plane. It shows health, readiness, broker status, topic summaries, DLQ entries, the configured control URL, and the configured gRPC URL; it does not publish, consume, ACK, NACK, supervise broker processes, or implement broker semantics. TUI usage, key bindings, limits, and expected error behavior are documented in [docs/TUI.md](docs/TUI.md).
+
 Start the local control-plane server:
 
 ```sh
@@ -58,6 +60,8 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 pnpm build
+node packages/tui/dist/cli.js --version
+node packages/tui/dist/cli.js --help
 pnpm --filter @ferrumq/cli build
 node packages/cli/dist/cli.js --version
 node packages/cli/dist/cli.js --help

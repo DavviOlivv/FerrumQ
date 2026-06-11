@@ -1,6 +1,6 @@
 # Testing Strategy
 
-FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer. Milestone 2 adds broker behavior coverage for synchronous in-memory delivery semantics. Milestone 3 adds filesystem-backed storage coverage for the local append-only log foundation. Milestone 4 adds durable broker reopen coverage for local at-least-once delivery. Milestone 5 adds control-plane HTTP adapter coverage against Axum routers without fixed ports. Milestone 6 adds protobuf generation exposure tests and in-process tonic coverage for the local gRPC data plane. Milestone 7 adds TypeScript CLI coverage against parser/config seams plus mocked HTTP and gRPC clients.
+FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer. Milestone 2 adds broker behavior coverage for synchronous in-memory delivery semantics. Milestone 3 adds filesystem-backed storage coverage for the local append-only log foundation. Milestone 4 adds durable broker reopen coverage for local at-least-once delivery. Milestone 5 adds control-plane HTTP adapter coverage against Axum routers without fixed ports. Milestone 6 adds protobuf generation exposure tests and in-process tonic coverage for the local gRPC data plane. Milestone 7 adds TypeScript CLI coverage against parser/config seams plus mocked HTTP and gRPC clients. Milestone 8 adds TypeScript TUI coverage against config, loader, rendering, and keyboard seams.
 
 ## Unit Tests
 
@@ -42,7 +42,11 @@ Use `criterion` for publish, append, read, ACK/NACK, retry scheduling, and recov
 
 ## CLI and TUI Tests
 
-Use `vitest` for TypeScript unit tests and lightweight built-entrypoint smoke tests. Milestone 7 CLI tests cover command parsing for all command families, command-specific help, config precedence, URL validation, topic and numeric validation, human and JSON output shapes, mocked `fetch` success and FerrumQ error envelopes, malformed HTTP responses, network failure formatting, mocked gRPC publish/consume/ACK/NACK behavior, gRPC status formatting, dynamic proto-load failures, malformed gRPC responses, and non-zero expected failure returns. Built CLI version/root-help/topic-help/publish-help smoke tests run after build. Process-level TypeScript gRPC integration is deferred because `brokerd serve-grpc --listen 127.0.0.1:0` does not expose the selected port; Rust in-process gRPC tests cover the service semantics. TUI behavior should be tested at component and command-boundary levels without reimplementing Rust broker semantics.
+Use `vitest` for TypeScript unit tests and lightweight built-entrypoint smoke tests. Milestone 7 CLI tests cover command parsing for all command families, command-specific help, config precedence, URL validation, topic and numeric validation, human and JSON output shapes, mocked `fetch` success and FerrumQ error envelopes, malformed HTTP responses, network failure formatting, mocked gRPC publish/consume/ACK/NACK behavior, gRPC status formatting, dynamic proto-load failures, malformed gRPC responses, and non-zero expected failure returns. Built CLI version/root-help/topic-help/publish-help smoke tests run after build.
+
+Milestone 8 protocol tests cover the shared HTTP control-plane client, including successful DTO mapping, FerrumQ error envelopes, malformed non-2xx bodies, network failures, invalid JSON, and schema mismatches. TUI tests cover config defaults/env/flags, URL validation, loader success and refresh failures, dashboard/topics/DLQ/help rendering, `r`, `1`, `2`, `3`, `?`, and `q` keyboard interactions, and built `ferrumq-tui --version` and `--help` smoke checks.
+
+Process-level TypeScript gRPC integration is deferred because `brokerd serve-grpc --listen 127.0.0.1:0` does not expose the selected port; Rust in-process gRPC tests cover the service semantics. TUI behavior should remain component and command-boundary coverage without reimplementing Rust broker semantics.
 
 ## CI Gates
 
@@ -61,6 +65,8 @@ The local and CI gates are:
 - `pnpm typecheck`.
 - `pnpm test`.
 - `pnpm build`.
+- `node packages/tui/dist/cli.js --version`.
+- `node packages/tui/dist/cli.js --help`.
 - `pnpm --filter @ferrumq/cli build`.
 - `node packages/cli/dist/cli.js --version`.
 - `node packages/cli/dist/cli.js --help`.

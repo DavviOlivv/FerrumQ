@@ -3,7 +3,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { z } from "zod";
+import { z, ZodError, type ZodType } from "zod";
 
 export const httpStatusResponseSchema = z.object({
   status: z.string().min(1),
@@ -62,6 +62,257 @@ export const ferrumQErrorEnvelopeSchema = z.object({
 });
 
 export type FerrumQErrorEnvelope = z.infer<typeof ferrumQErrorEnvelopeSchema>;
+
+export type FetchLike = (
+  input: string,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+) => Promise<ResponseLike>;
+
+export interface ResponseLike {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  json(): Promise<unknown>;
+}
+
+export interface ControlPlaneClient {
+  health(): Promise<HttpStatusResponse>;
+  ready(): Promise<HttpStatusResponse>;
+  status(): Promise<BrokerStatusResponse>;
+  createTopic(name: string, partitions: number): Promise<TopicResponse>;
+  getTopic(name: string): Promise<TopicResponse>;
+  listTopics(): Promise<TopicListResponse>;
+  listDlq(topic?: string): Promise<DlqListResponse>;
+}
+
+export type ControlPlaneRequestErrorKind =
+  | "network"
+  | "ferrumq-error"
+  | "malformed-error"
+  | "invalid-json"
+  | "schema";
+
+export interface ControlPlaneRequestErrorOptions {
+  kind: ControlPlaneRequestErrorKind;
+  method: string;
+  url: string;
+  status?: number;
+  statusText?: string;
+  ferrumqError?: FerrumQErrorEnvelope["error"];
+  validationIssues?: unknown[];
+  cause?: unknown;
+}
+
+export class ControlPlaneRequestError extends Error {
+  readonly kind: ControlPlaneRequestErrorKind;
+  readonly method: string;
+  readonly url: string;
+  readonly status: number | undefined;
+  readonly statusText: string | undefined;
+  readonly ferrumqError: FerrumQErrorEnvelope["error"] | undefined;
+  readonly validationIssues: unknown[] | undefined;
+
+  constructor(message: string, options: ControlPlaneRequestErrorOptions) {
+    super(message, { cause: options.cause });
+    this.name = "ControlPlaneRequestError";
+    this.kind = options.kind;
+    this.method = options.method;
+    this.url = options.url;
+    this.status = options.status;
+    this.statusText = options.statusText;
+    this.ferrumqError = options.ferrumqError;
+    this.validationIssues = options.validationIssues;
+  }
+}
+
+export function createControlPlaneClient(
+  controlUrl: string,
+  fetchImpl: FetchLike = fetch as FetchLike,
+): ControlPlaneClient {
+  return {
+    health: () =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "GET",
+        "/health",
+        httpStatusResponseSchema,
+      ),
+    ready: () =>
+      request(controlUrl, fetchImpl, "GET", "/ready", httpStatusResponseSchema),
+    status: () =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "GET",
+        "/v1/status",
+        brokerStatusResponseSchema,
+      ),
+    createTopic: (name, partitions) =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "POST",
+        "/v1/topics",
+        topicResponseSchema,
+        {
+          name,
+          partitions,
+        },
+      ),
+    getTopic: (name) =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "GET",
+        `/v1/topics/${encodeURIComponent(name)}`,
+        topicResponseSchema,
+      ),
+    listTopics: () =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "GET",
+        "/v1/topics",
+        topicListResponseSchema,
+      ),
+    listDlq: (topic) =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "GET",
+        topic === undefined
+          ? "/v1/dlq"
+          : `/v1/dlq?topic=${encodeURIComponent(topic)}`,
+        dlqListResponseSchema,
+      ),
+  };
+}
+
+async function request<T>(
+  controlUrl: string,
+  fetchImpl: FetchLike,
+  method: string,
+  requestPath: string,
+  schema: ZodType<T>,
+  body?: unknown,
+): Promise<T> {
+  const url = buildUrl(controlUrl, requestPath);
+  let response: ResponseLike;
+  try {
+    const init: {
+      method: string;
+      headers?: Record<string, string>;
+      body?: string;
+    } = { method };
+    if (body !== undefined) {
+      init.headers = { "content-type": "application/json" };
+      init.body = JSON.stringify(body);
+    }
+    response = await fetchImpl(url, init);
+  } catch (error) {
+    throw new ControlPlaneRequestError(
+      `Network request failed for ${method} ${url}: ${errorMessage(error)}`,
+      { kind: "network", method, url, cause: error },
+    );
+  }
+
+  const json = await readJson(response);
+  if (!json.ok) {
+    if (!response.ok) {
+      throw malformedHttpError(method, url, response);
+    }
+
+    throw new ControlPlaneRequestError(
+      "Unexpected response from control API: invalid JSON",
+      { kind: "invalid-json", method, url, cause: json.error },
+    );
+  }
+
+  if (!response.ok) {
+    const envelope = ferrumQErrorEnvelopeSchema.safeParse(json.payload);
+    if (envelope.success) {
+      throw new ControlPlaneRequestError(
+        `HTTP ${response.status} ${envelope.data.error.code}: ${envelope.data.error.message}`,
+        {
+          kind: "ferrumq-error",
+          method,
+          url,
+          status: response.status,
+          statusText: response.statusText,
+          ferrumqError: envelope.data.error,
+        },
+      );
+    }
+
+    throw malformedHttpError(method, url, response);
+  }
+
+  try {
+    return schema.parse(json.payload);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      throw new ControlPlaneRequestError(
+        `Unexpected response from control API: ${error.issues[0]?.message}`,
+        {
+          kind: "schema",
+          method,
+          url,
+          validationIssues: error.issues,
+          cause: error,
+        },
+      );
+    }
+    throw error;
+  }
+}
+
+function malformedHttpError(
+  method: string,
+  url: string,
+  response: ResponseLike,
+): ControlPlaneRequestError {
+  return new ControlPlaneRequestError(
+    `HTTP ${response.status}: ${response.statusText || "request failed"}`,
+    {
+      kind: "malformed-error",
+      method,
+      url,
+      status: response.status,
+      statusText: response.statusText,
+    },
+  );
+}
+
+function buildUrl(controlUrl: string, requestPath: string): string {
+  return new URL(requestPath, `${controlUrl}/`).toString();
+}
+
+async function readJson(
+  response: ResponseLike,
+): Promise<{ ok: true; payload: unknown } | { ok: false; error: unknown }> {
+  try {
+    return { ok: true, payload: await response.json() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "unexpected error";
+}
 
 export type DecimalString = `${number}` | string;
 

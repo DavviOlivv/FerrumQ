@@ -61,6 +61,8 @@ ci:
 	pnpm typecheck
 	pnpm test
 	pnpm build
+	node packages/tui/dist/cli.js --version
+	node packages/tui/dist/cli.js --help
 	pnpm --filter @ferrumq/cli build
 	node packages/cli/dist/cli.js --version
 	node packages/cli/dist/cli.js --help

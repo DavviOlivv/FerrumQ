@@ -2,10 +2,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   brokerStatusResponseSchema,
+  ControlPlaneRequestError,
+  createControlPlaneClient,
   createGrpcDataPlaneClient,
   dlqListResponseSchema,
   ferrumQErrorEnvelopeSchema,
@@ -16,6 +18,8 @@ import {
   topicListResponseSchema,
   topicResponseSchema,
 } from "../src/index.js";
+
+import type { FetchLike, ResponseLike } from "../src/index.js";
 
 describe("HTTP schemas", () => {
   it("parses success DTOs", () => {
@@ -103,6 +107,145 @@ describe("HTTP schemas", () => {
         statusCode: 400,
       },
     });
+  });
+});
+
+describe("HTTP control-plane client", () => {
+  it("maps successful control-plane requests and DTOs", async () => {
+    const calls: Array<{
+      input: string;
+      init: Parameters<FetchLike>[1];
+    }> = [];
+    const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+      calls.push({ input, init });
+      switch (`${init?.method ?? "GET"} ${input}`) {
+        case "GET http://control.local:8080/health":
+          return response(200, { status: "ok" });
+        case "GET http://control.local:8080/ready":
+          return response(200, { status: "ready" });
+        case "GET http://control.local:8080/v1/status":
+          return response(200, {
+            mode: "durable",
+            dataDir: "./.ferrumq",
+            topics: 2,
+            dlqEntries: 1,
+          });
+        case "POST http://control.local:8080/v1/topics":
+          expect(init?.body).toBe('{"name":"orders","partitions":3}');
+          return response(200, { name: "orders", partitions: 3 });
+        case "GET http://control.local:8080/v1/topics/orders":
+          return response(200, { name: "orders", partitions: 3 });
+        case "GET http://control.local:8080/v1/topics":
+          return response(200, { items: [{ name: "orders", partitions: 3 }] });
+        case "GET http://control.local:8080/v1/dlq?topic=orders":
+          return response(200, { items: [] });
+        default:
+          throw new Error(`unexpected request ${init?.method} ${input}`);
+      }
+    });
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      fetchImpl,
+    );
+
+    await expect(client.health()).resolves.toEqual({ status: "ok" });
+    await expect(client.ready()).resolves.toEqual({ status: "ready" });
+    await expect(client.status()).resolves.toEqual({
+      mode: "durable",
+      dataDir: "./.ferrumq",
+      topics: 2,
+      dlqEntries: 1,
+    });
+    await expect(client.createTopic("orders", 3)).resolves.toEqual({
+      name: "orders",
+      partitions: 3,
+    });
+    await expect(client.getTopic("orders")).resolves.toEqual({
+      name: "orders",
+      partitions: 3,
+    });
+    await expect(client.listTopics()).resolves.toEqual({
+      items: [{ name: "orders", partitions: 3 }],
+    });
+    await expect(client.listDlq("orders")).resolves.toEqual({ items: [] });
+    expect(calls.map((call) => `${call.init?.method} ${call.input}`)).toEqual([
+      "GET http://control.local:8080/health",
+      "GET http://control.local:8080/ready",
+      "GET http://control.local:8080/v1/status",
+      "POST http://control.local:8080/v1/topics",
+      "GET http://control.local:8080/v1/topics/orders",
+      "GET http://control.local:8080/v1/topics",
+      "GET http://control.local:8080/v1/dlq?topic=orders",
+    ]);
+  });
+
+  it("distinguishes expected HTTP failure modes", async () => {
+    const ferrumQClient = createControlPlaneClient(
+      "http://control.local:8080",
+      vi.fn<FetchLike>(async () =>
+        response(409, {
+          error: {
+            code: "TOPIC_ALREADY_EXISTS",
+            message: "topic exists",
+            details: {},
+            statusCode: 409,
+          },
+        }),
+      ),
+    );
+    await expect(ferrumQClient.status()).rejects.toMatchObject({
+      kind: "ferrumq-error",
+      message: "HTTP 409 TOPIC_ALREADY_EXISTS: topic exists",
+    });
+
+    const malformedErrorClient = createControlPlaneClient(
+      "http://control.local:8080",
+      vi.fn<FetchLike>(async () => response(418, { nope: true }, "Teapot")),
+    );
+    await expect(malformedErrorClient.status()).rejects.toMatchObject({
+      kind: "malformed-error",
+      message: "HTTP 418: Teapot",
+    });
+
+    const networkClient = createControlPlaneClient(
+      "http://control.local:8080",
+      vi.fn<FetchLike>(async () => {
+        throw new TypeError("connection refused");
+      }),
+    );
+    await expect(networkClient.ready()).rejects.toMatchObject({
+      kind: "network",
+      message:
+        "Network request failed for GET http://control.local:8080/ready: connection refused",
+    });
+
+    const invalidJsonClient = createControlPlaneClient(
+      "http://control.local:8080",
+      vi.fn<FetchLike>(async () => invalidJsonResponse(200)),
+    );
+    await expect(invalidJsonClient.health()).rejects.toMatchObject({
+      kind: "invalid-json",
+      message: "Unexpected response from control API: invalid JSON",
+    });
+
+    const schemaMismatchClient = createControlPlaneClient(
+      "http://control.local:8080",
+      vi.fn<FetchLike>(async () => response(200, { status: "" })),
+    );
+    await expect(schemaMismatchClient.health()).rejects.toMatchObject({
+      kind: "schema",
+    });
+  });
+
+  it("uses a typed request error class for control-plane failures", async () => {
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      vi.fn<FetchLike>(async () => invalidJsonResponse(500, "Server Error")),
+    );
+
+    await expect(client.status()).rejects.toBeInstanceOf(
+      ControlPlaneRequestError,
+    );
   });
 });
 
@@ -451,3 +594,29 @@ describe("gRPC client helpers", () => {
     ).rejects.toThrow("gRPC response field messages was not an array");
   });
 });
+
+function response(
+  status: number,
+  payload: unknown,
+  statusText = status >= 200 && status < 300 ? "OK" : "Bad Request",
+): ResponseLike {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText,
+    async json() {
+      return payload;
+    },
+  };
+}
+
+function invalidJsonResponse(status: number, statusText = "OK"): ResponseLike {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText,
+    async json() {
+      throw new SyntaxError("Unexpected token");
+    },
+  };
+}

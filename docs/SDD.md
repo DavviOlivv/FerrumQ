@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`. Milestone 7 adds the first usable TypeScript CLI as an adapter over those Rust-owned APIs.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`. Milestone 7 adds the first usable TypeScript CLI as an adapter over those Rust-owned APIs. Milestone 8 adds the first read-only TypeScript TUI over the HTTP control plane.
 
 ## 1. Product Vision
 
@@ -24,6 +24,7 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No auth/RBAC, TLS, rate limiting, clustering, replication, consensus, or daemonization in Milestone 5.
 - No streaming consume, generated TypeScript gRPC clients, SDK integration, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, exactly-once semantics, or daemonization in Milestone 6.
 - No TypeScript broker process supervision, public SDK surface, streaming consume, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, or exactly-once semantics in Milestone 7.
+- No TUI publish, consume, ACK, NACK, broker process supervision, data-plane gRPC calls, streaming consume, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, or exactly-once semantics in Milestone 8.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
 
@@ -143,25 +144,50 @@ HTTP or gRPC clients.
 Human-readable output is the default. `--json` uses stable wrappers and renders
 gRPC `uint64` response fields as decimal strings. Human consume output includes
 delivery ID, message ID, topic, partition, offset, attempt number, and payload.
-Expected errors are short human text on stderr even when `--json` is set.
+Expected errors are short human text on stderr even when `--json` is set. The
+shared `@ferrumq/protocol` HTTP control-plane client owns DTO validation and
+distinguishes network failures, FerrumQ error envelopes, malformed non-2xx
+responses, invalid JSON, and schema mismatches.
 
-## 21. Observability
+## 21. TypeScript TUI
+
+Milestone 8 implements `ferrumq-tui` as the first usable TypeScript terminal UI.
+The TUI is an adapter over the HTTP control plane and does not own broker
+behavior. It displays the configured gRPC URL only as state; it does not call
+the gRPC data plane.
+
+The TUI supports local `--help` and `--version`, plus `--control-url` and
+`--grpc-url`. `FERRUMQ_CONTROL_URL` and `FERRUMQ_GRPC_URL` are supported with
+the same precedence as the CLI: flag, then environment, then default. Defaults
+are `http://127.0.0.1:8080` for HTTP and `http://127.0.0.1:9090` for gRPC.
+
+On startup and manual refresh, the TUI concurrently fetches `/health`,
+`/ready`, `/v1/status`, `/v1/topics`, and `/v1/dlq`. It keeps active view, last
+successful snapshot, loading/error, refresh count, and last refresh timestamp in
+local UI state. Views are dashboard, topics, DLQ, and help. Key bindings are
+`r` refresh, `q` quit, `1` dashboard, `2` topics, `3` DLQ, and `?` help.
+
+Refresh failures are expected user-facing states, not stack traces. If a
+partial refresh fails, the TUI renders one short error message and keeps any
+last successful snapshot visible.
+
+## 22. Observability
 
 Broker internals must be observable through structured logs and later metrics/traces. Use `tracing`, `tracing-subscriber`, and future OpenTelemetry integration.
 
-## 22. Security Assumptions
+## 23. Security Assumptions
 
 Early milestones assume local development. Authentication, authorization, multi-tenant isolation, and secret management are future work and must not be implied by Milestone 2 code.
 
-## 23. Testing Strategy Summary
+## 24. Testing Strategy Summary
 
-The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Milestone 6 adds protocol generation/exposure tests, in-process tonic service tests for publish/consume/ACK/NACK and durability, and runtime smoke tests for `serve-grpc`. Milestone 7 adds Vitest coverage for CLI parsing, config precedence, validation, JSON output, HTTP success/error handling, network failures, mocked gRPC data-plane commands, gRPC status formatting, and built CLI smoke tests. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
+The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Milestone 6 adds protocol generation/exposure tests, in-process tonic service tests for publish/consume/ACK/NACK and durability, and runtime smoke tests for `serve-grpc`. Milestone 7 adds Vitest coverage for CLI parsing, config precedence, validation, JSON output, HTTP success/error handling, network failures, mocked gRPC data-plane commands, gRPC status formatting, and built CLI smoke tests. Milestone 8 adds Vitest coverage for the shared HTTP control client, TUI config precedence, loader success/failures, Ink rendering, keyboard interactions, and built TUI help/version smoke tests. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
 
-## 24. Milestone Roadmap
+## 25. Milestone Roadmap
 
 The roadmap is defined in [MILESTONES.md](MILESTONES.md), from project skeleton through hardening review.
 
-## 25. Invariants
+## 26. Invariants
 
 - A message appended through durable storage must be recoverable according to the configured durability policy.
 - A delivered but unacked message may be delivered again.

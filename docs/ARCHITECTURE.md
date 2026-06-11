@@ -34,6 +34,8 @@ Milestone 6 adds a gRPC data-plane adapter without moving broker semantics into 
 
 Milestone 7 adds the first TypeScript CLI foundation without creating a TypeScript broker. `@ferrumq/cli` validates command input, resolves configuration, formats human and JSON output, and calls the Rust-owned adapters: HTTP for control-plane commands and unary gRPC for data-plane commands. `@ferrumq/protocol` provides only the small schemas and dynamic gRPC helper needed by the CLI, not a public SDK. Broker process supervision, streaming consume, auth/TLS, and distributed behavior remain deferred.
 
+Milestone 8 adds the first TypeScript TUI foundation under the same boundary. `@ferrumq/tui` renders an Ink dashboard from the HTTP control plane through the shared `@ferrumq/protocol` control-plane client. It is read-only, keeps the gRPC URL as configured display state only, and does not publish, consume, ACK, NACK, supervise processes, or call the data plane.
+
 Planned dependency direction:
 
 ```txt
@@ -55,6 +57,8 @@ Milestone 5 implements the first control-plane adapter with Axum and local durab
 Milestone 6 implements the first data-plane adapter with tonic/prost and the local durable broker. The gRPC service exposes unary `Publish`, `Consume`, `Ack`, and `Nack` calls. Delivery remains local durable at-least-once and `idempotency_key` is metadata-only, so consumers must be idempotent and producers do not get deduplication guarantees yet. It maps validation failures to `INVALID_ARGUMENT`, unknown topics and stale deliveries to `NOT_FOUND`, invalid delivery ownership to `FAILED_PRECONDITION`, duplicate topics to `ALREADY_EXISTS` if surfaced through broker APIs, unavailable broker state to `UNAVAILABLE`, and storage/corruption/unexpected failures to sanitized `INTERNAL` statuses.
 
 Milestone 7 exposes both planes through `ferrumq`: health, readiness, status, topic, and DLQ commands use HTTP; publish, consume, ACK, and NACK commands use unary gRPC. Help and version commands are local. JSON CLI output wraps each command family in stable top-level keys and represents gRPC `uint64` values as decimal strings; expected errors remain short human text on stderr.
+
+Milestone 8 exposes a read-only `ferrumq-tui` view of the control plane. It fetches health, readiness, status, topic list, and DLQ list concurrently on startup and manual refresh. Partial refresh failures become short user-facing error text while the last successful snapshot remains visible.
 
 ## Future Distributed Evolution
 

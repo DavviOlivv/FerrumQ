@@ -214,16 +214,32 @@ Implemented scope:
 
 Deferred from Milestone 7:
 
-- TypeScript TUI, public SDK surface, generated TypeScript clients, process-level TypeScript gRPC integration without fixed ports, streaming consume, auth/RBAC, TLS, rate limiting, broker process supervision, observability dashboards/export, clustering, replication, exactly-once semantics, and MaaS/multi-tenancy.
+- Public SDK surface, generated TypeScript clients, process-level TypeScript gRPC integration without fixed ports, streaming consume, auth/RBAC, TLS, rate limiting, broker process supervision, observability dashboards/export, clustering, replication, exactly-once semantics, and MaaS/multi-tenancy.
 
 ## Milestone 8: TypeScript TUI
 
 - Ink dashboard.
 - Broker status.
 - Topics.
-- Lag.
 - DLQ.
-- Logs.
+
+Status: implemented as the first read-only TypeScript TUI foundation.
+
+Implemented scope:
+
+- `ferrumq-tui` public binary in `@ferrumq/tui`, separate from the hardened `ferrumq` CLI command surface.
+- Ink/React dashboard over the HTTP control plane with local `--help`, `--version`, `--control-url`, and `--grpc-url` parsing.
+- Configuration precedence of CLI flag, then `FERRUMQ_CONTROL_URL` or `FERRUMQ_GRPC_URL`, then defaults `http://127.0.0.1:8080` and `http://127.0.0.1:9090`.
+- Shared `@ferrumq/protocol` HTTP control-plane client for health, readiness, status, topics, and DLQ inspection, with structured network, HTTP envelope, malformed error body, invalid JSON, and schema-validation failures.
+- TUI state for active view, last successful snapshot, loading/error, refresh count, and last refresh timestamp.
+- Manual refresh and keyboard navigation: `r`, `q`, `1`, `2`, `3`, and `?`.
+- Read-only dashboard, topics, DLQ, help, and footer views. The configured gRPC URL is displayed as state only.
+- Vitest coverage for config precedence, loader success/failure behavior, rendering, interactions, and built TUI help/version smoke checks.
+- `make ci` safe smoke checks for `node packages/tui/dist/cli.js --version` and `--help`.
+
+Deferred from Milestone 8:
+
+- TUI publish, consume, ACK, NACK, retry, cursor, lag, log streaming, broker process supervision, data-plane gRPC calls, auth/RBAC, TLS, rate limiting, observability dashboards/export, public SDK workflows, streaming consume, clustering, replication, exactly-once semantics, and MaaS/multi-tenancy.
 
 ## Milestone 9: Observability
 

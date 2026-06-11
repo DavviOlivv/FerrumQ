@@ -5,6 +5,10 @@ Milestone 7 introduces the first usable TypeScript CLI. The public binary is
 control-plane commands call the HTTP API and data-plane commands call unary
 gRPC. Broker behavior remains owned by Rust.
 
+Milestone 8 adds a separate `ferrumq-tui` binary for read-only terminal
+inspection. It is documented in [TUI.md](TUI.md) and does not change the CLI
+command surface.
+
 ## Defaults
 
 - Control-plane URL: `http://127.0.0.1:8080`.
@@ -119,8 +123,8 @@ Error output is currently human text on stderr even when `--json` is set.
 
 ## Deferred Scope
 
-The TypeScript CLI does not start, supervise, or embed the broker. TUI,
-public SDK, auth/RBAC, TLS, streaming consume, rate limiting, observability
+The TypeScript CLI does not start, supervise, or embed the broker. Public SDK,
+auth/RBAC, TLS, streaming consume, rate limiting, observability
 dashboards/export, clustering, replication, exactly-once semantics, and
 MaaS/multi-tenancy remain deferred. TypeScript process-level gRPC integration
 tests are also deferred because `brokerd serve-grpc --listen 127.0.0.1:0` does
