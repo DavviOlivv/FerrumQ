@@ -72,6 +72,11 @@ export function validateHttpUrl(value: string, field: string): string {
     throw new ExpectedCliError(`${field} must use http:// or https://`);
   }
   validateUrlParts(parsed, field);
+  if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+    throw new ExpectedCliError(
+      `${field} must not include a path, query, or fragment`,
+    );
+  }
   return stripTrailingSlash(parsed.toString());
 }
 

@@ -22,14 +22,23 @@ FERRUMQ_CONTROL_URL=http://127.0.0.1:8080 ferrumq health
 FERRUMQ_GRPC_URL=http://127.0.0.1:9090 ferrumq consume orders --group workers
 ```
 
+Control URLs must be HTTP or HTTPS origins without credentials, paths, queries,
+or fragments. gRPC URLs must be HTTP origins with an explicit port and no
+credentials, paths, queries, or fragments; gRPC TLS/HTTPS remains deferred.
+
 ## Commands
 
 ```sh
 ferrumq --version
 ferrumq --help
 ferrumq broker --help
+ferrumq topic --help
+ferrumq publish --help
 ferrumq broker version
 ```
+
+Help and version commands are local, exit `0`, and do not call the HTTP or gRPC
+clients.
 
 `broker version` runs `brokerd --version`. If `brokerd` is not on `PATH`, the
 CLI reports a short expected error. Broker process supervision commands are not
@@ -60,9 +69,10 @@ ferrumq nack delivery-1 --reason poison
 ```
 
 Publish generates `message_id` as `msg_${crypto.randomUUID()}` unless
-`--message-id` is provided. `--data` must be non-empty. Topic names, consumer
-groups, bounded identifiers, partition counts, consume limits, and lease values
-are validated before requests are sent.
+`--message-id` is provided. `--idempotency-key` is sent as message metadata only;
+the broker does not deduplicate publishes by that key yet. `--data` must be
+non-empty. Topic names, consumer groups, bounded identifiers, partition counts,
+consume limits, and lease values are validated before requests are sent.
 
 ## Output
 
@@ -86,6 +96,9 @@ Wrappers are:
 gRPC `uint64` response fields are rendered as decimal strings in JSON so large
 offsets and timestamps are not truncated by JavaScript number limits.
 
+Human `consume` output includes delivery ID, message ID, topic, partition,
+offset, attempt number, and payload.
+
 ## Errors
 
 Expected failures exit non-zero without stack traces. HTTP non-2xx responses
@@ -102,9 +115,14 @@ Network request failed for GET http://127.0.0.1:8080/ready: connection refused
 gRPC INVALID_ARGUMENT (3): topic_name must not be empty
 ```
 
+Error output is currently human text on stderr even when `--json` is set.
+
 ## Deferred Scope
 
 The TypeScript CLI does not start, supervise, or embed the broker. TUI,
 public SDK, auth/RBAC, TLS, streaming consume, rate limiting, observability
 dashboards/export, clustering, replication, exactly-once semantics, and
-MaaS/multi-tenancy remain deferred.
+MaaS/multi-tenancy remain deferred. TypeScript process-level gRPC integration
+tests are also deferred because `brokerd serve-grpc --listen 127.0.0.1:0` does
+not expose the selected port; Milestone 7 relies on Rust in-process gRPC tests
+and mocked TypeScript client seams.

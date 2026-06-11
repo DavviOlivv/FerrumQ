@@ -61,6 +61,8 @@ pnpm build
 pnpm --filter @ferrumq/cli build
 node packages/cli/dist/cli.js --version
 node packages/cli/dist/cli.js --help
+node packages/cli/dist/cli.js topic --help
+node packages/cli/dist/cli.js publish --help
 cargo run -p msg-runtime --bin brokerd -- --version
 git diff --check
 ```

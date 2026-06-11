@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && chmod +x dist/cli.js",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "pnpm --filter @ferrumq/protocol run build && tsc --noEmit"
   },
   "dependencies": {
     "@ferrumq/protocol": "workspace:*",

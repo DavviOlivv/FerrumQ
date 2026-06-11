@@ -33,12 +33,17 @@ contract helpers needed by `@ferrumq/cli`:
 - `createGrpcDataPlaneClient` using `@grpc/grpc-js` and
   `@grpc/proto-loader` against
   `crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto`.
-- `normalizeGrpcTarget`, which accepts `http://host:port` and rejects HTTPS/TLS
-  because auth/TLS are deferred.
+- `normalizeGrpcTarget`, which accepts `http://host:port` only and rejects
+  credentials, missing ports, paths, queries, fragments, and HTTPS/TLS because
+  auth/TLS are deferred.
 - gRPC status formatting helpers for short CLI expected errors.
 
 Dynamic gRPC loading uses decimal strings for `uint64` response values so CLI
 JSON output does not lose precision for offsets or timestamps.
+
+Milestone 7 TypeScript tests use mocked raw gRPC clients and proto-loading
+failure seams. Real service semantics stay covered by Rust in-process gRPC
+tests until broker runtime port discovery exists for `127.0.0.1:0`.
 
 ## gRPC Data Plane
 

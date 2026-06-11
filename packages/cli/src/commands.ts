@@ -13,7 +13,17 @@ import {
   type ResolvedConfig,
 } from "./config.js";
 import { ExpectedCliError } from "./errors.js";
-import { brokerHelpText, rootHelpText, versionText } from "./help.js";
+import {
+  ackHelpText,
+  brokerHelpText,
+  consumeHelpText,
+  dlqHelpText,
+  nackHelpText,
+  publishHelpText,
+  rootHelpText,
+  topicHelpText,
+  versionText,
+} from "./help.js";
 import {
   createControlPlaneClient,
   type ControlPlaneClient,
@@ -73,6 +83,18 @@ export async function executeCommand(
       return text(versionText());
     case "broker-help":
       return text(brokerHelpText());
+    case "topic-help":
+      return text(topicHelpText());
+    case "dlq-help":
+      return text(dlqHelpText());
+    case "publish-help":
+      return text(publishHelpText());
+    case "consume-help":
+      return text(consumeHelpText());
+    case "ack-help":
+      return text(ackHelpText());
+    case "nack-help":
+      return text(nackHelpText());
     case "broker-version":
       return text(await brokerdVersion(context)());
     case "health":

@@ -130,14 +130,20 @@ Global `--control-url`, `--grpc-url`, and `--json` flags are supported.
 `FERRUMQ_CONTROL_URL` and `FERRUMQ_GRPC_URL` are also supported. Precedence is
 flag, then environment, then default. Defaults are
 `http://127.0.0.1:8080` for HTTP and `http://127.0.0.1:9090` for gRPC.
+URLs are validated client-side as API origins; control URLs reject credentials,
+paths, queries, and fragments, and gRPC URLs additionally require an explicit
+port and reject HTTPS/TLS until that scope is implemented.
 
 Control-plane CLI commands call HTTP: health, ready, status, topic create/get/list,
 and DLQ list. Data-plane CLI commands call unary gRPC: publish, consume, ACK,
 and NACK. `broker version` shells out to `brokerd --version`; start/supervise
-commands remain deferred.
+commands remain deferred. Help and version commands are local and do not call
+HTTP or gRPC clients.
 
 Human-readable output is the default. `--json` uses stable wrappers and renders
-gRPC `uint64` response fields as decimal strings.
+gRPC `uint64` response fields as decimal strings. Human consume output includes
+delivery ID, message ID, topic, partition, offset, attempt number, and payload.
+Expected errors are short human text on stderr even when `--json` is set.
 
 ## 21. Observability
 

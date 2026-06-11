@@ -58,7 +58,7 @@ export function formatMessages(messages: DataPlaneConsumedMessage[]): string {
   return messages
     .map(
       (message) =>
-        `${message.deliveryId}\t${message.messageId}\t${message.topic}[${message.partition}]@${message.offset}\t${message.payload.toString("utf8")}`,
+        `delivery=${message.deliveryId}\tmessage=${message.messageId}\ttopic=${message.topic}\tpartition=${message.partition}\toffset=${message.offset}\tattempt=${message.attemptNumber}\tpayload=${message.payload.toString("utf8")}`,
     )
     .join("\n");
 }

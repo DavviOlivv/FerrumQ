@@ -6,6 +6,12 @@ export type ParsedCommand =
   | { kind: "root-help" }
   | { kind: "version" }
   | { kind: "broker-help" }
+  | { kind: "topic-help" }
+  | { kind: "dlq-help" }
+  | { kind: "publish-help" }
+  | { kind: "consume-help" }
+  | { kind: "ack-help" }
+  | { kind: "nack-help" }
   | { kind: "broker-version" }
   | { kind: "health" }
   | { kind: "ready" }
@@ -156,10 +162,24 @@ function parseCommand(
   }
 
   if (helpRequested) {
-    if (tokens[0] === "broker") {
-      return { kind: "broker-help" };
+    switch (tokens[0]) {
+      case "broker":
+        return { kind: "broker-help" };
+      case "topic":
+        return { kind: "topic-help" };
+      case "dlq":
+        return { kind: "dlq-help" };
+      case "publish":
+        return { kind: "publish-help" };
+      case "consume":
+        return { kind: "consume-help" };
+      case "ack":
+        return { kind: "ack-help" };
+      case "nack":
+        return { kind: "nack-help" };
+      default:
+        return { kind: "root-help" };
     }
-    return { kind: "root-help" };
   }
 
   const command = tokens[0];
@@ -327,6 +347,7 @@ function parseOptions(
 ): OptionParseResult {
   const positionals: string[] = [];
   const options = new Map<string, string>();
+  let optionSeen = false;
 
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
@@ -335,10 +356,16 @@ function parseOptions(
     }
 
     if (!token.startsWith("--")) {
+      if (optionSeen) {
+        throw new ExpectedCliError(
+          "Positional arguments must appear before options",
+        );
+      }
       positionals.push(token);
       continue;
     }
 
+    optionSeen = true;
     const [rawName, inlineValue] = splitOption(token);
     const name = rawName.slice(2);
     if (!allowed.includes(name)) {

@@ -42,7 +42,7 @@ Use `criterion` for publish, append, read, ACK/NACK, retry scheduling, and recov
 
 ## CLI and TUI Tests
 
-Use `vitest` for TypeScript unit tests and `execa` for future process-level CLI tests. Milestone 7 CLI tests cover command parsing for all command families, config precedence, topic and numeric validation, JSON wrapper shapes, mocked `fetch` success and FerrumQ error envelopes, network failure formatting, mocked gRPC publish/consume/ACK/NACK behavior, gRPC status formatting, and non-zero expected failure returns. Built CLI version/help smoke tests run after build. TUI behavior should be tested at component and command-boundary levels without reimplementing Rust broker semantics.
+Use `vitest` for TypeScript unit tests and lightweight built-entrypoint smoke tests. Milestone 7 CLI tests cover command parsing for all command families, command-specific help, config precedence, URL validation, topic and numeric validation, human and JSON output shapes, mocked `fetch` success and FerrumQ error envelopes, malformed HTTP responses, network failure formatting, mocked gRPC publish/consume/ACK/NACK behavior, gRPC status formatting, dynamic proto-load failures, malformed gRPC responses, and non-zero expected failure returns. Built CLI version/root-help/topic-help/publish-help smoke tests run after build. Process-level TypeScript gRPC integration is deferred because `brokerd serve-grpc --listen 127.0.0.1:0` does not expose the selected port; Rust in-process gRPC tests cover the service semantics. TUI behavior should be tested at component and command-boundary levels without reimplementing Rust broker semantics.
 
 ## CI Gates
 

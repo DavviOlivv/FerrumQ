@@ -36,10 +36,12 @@ Data-plane commands call unary gRPC through a tiny `@ferrumq/protocol` helper:
 
 Human-readable output is the default. `--json` returns stable wrapper objects
 for command families, and gRPC `uint64` response values are rendered as decimal
-strings to avoid unsafe JavaScript integer conversion.
+strings to avoid unsafe JavaScript integer conversion. Expected errors remain
+short human text on stderr even when `--json` is set.
 
 `broker version` remains a thin `brokerd --version` wrapper. Broker process
-management commands are not implemented in TypeScript.
+management commands are not implemented in TypeScript. Help and version
+commands are local and do not call HTTP or gRPC clients.
 
 ## Consequences
 
