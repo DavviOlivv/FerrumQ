@@ -1,8 +1,7 @@
 # FerrumQ TUI
 
-Milestone 8 introduces `ferrumq-tui`, the first usable TypeScript terminal UI.
-It is an Ink dashboard over the HTTP control plane. Rust remains the source of
-broker behavior.
+`ferrumq-tui` is the TypeScript terminal UI. It is an Ink dashboard over the
+HTTP control plane. Rust remains the source of broker behavior.
 
 ## Usage
 
@@ -11,6 +10,10 @@ Start the HTTP control plane:
 ```sh
 cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
 ```
+
+The TUI reads from that HTTP process only. If a separate
+`brokerd serve-grpc` process uses the same `--data-dir`, the TUI does not show
+live gRPC-process changes until the HTTP process is stopped and restarted.
 
 Run the TUI:
 
@@ -86,7 +89,7 @@ Help:
 - `3`: DLQ.
 - `?`: help.
 
-There is no auto-refresh in Milestone 8. Refresh is manual.
+There is no auto-refresh. Refresh is manual.
 
 ## Error Behavior
 
@@ -100,7 +103,7 @@ On startup and refresh, the TUI concurrently fetches:
 
 `GET /metrics` exists on the HTTP control plane as an operational Prometheus
 endpoint, but the TUI does not fetch it or render charts/live metric panels in
-Milestone 9.
+the current release.
 
 Expected failures render as short messages without stack traces. The shared
 HTTP client distinguishes network failures, FerrumQ non-2xx error envelopes,
@@ -114,9 +117,11 @@ keeps the last successful snapshot visible, including stale Topics and DLQ rows.
 
 ## Limitations
 
-The TUI is read-only in Milestone 8. It does not publish, consume, ACK, NACK,
-retry messages, inspect lag, stream logs, fetch `/metrics`, call the gRPC data
-plane, start or supervise broker processes, or implement broker semantics.
+The TUI is read-only. It does not publish, consume, ACK, NACK, retry messages,
+inspect lag, stream logs, fetch `/metrics`, call the gRPC data plane, start or
+supervise broker processes, or implement broker semantics.
+The configured gRPC URL is displayed for operator context only; it is not used
+for live data-plane inspection.
 Public SDK workflows, auth/RBAC, TLS, rate limiting, observability
 dashboards/export, clustering, replication, exactly-once semantics, and
 MaaS/multi-tenancy remain deferred.

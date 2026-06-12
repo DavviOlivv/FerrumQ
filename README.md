@@ -1,84 +1,193 @@
 # FerrumQ
 
-FerrumQ is a milestone-driven messaging engine foundation. The core broker, domain, runtime, and storage semantics are owned by Rust. TypeScript owns the developer-facing CLI, TUI, SDK, and protocol package surfaces.
+FerrumQ is a local-first messaging broker foundation. Rust owns the broker
+domain model, durable storage, HTTP control plane, unary gRPC data plane, and
+runtime. TypeScript owns the developer-facing CLI, read-only TUI, protocol
+helpers, and placeholder SDK package.
 
-Milestone 0 created the project skeleton, SDD documentation, architecture records, validation harness, and compile-tested placeholders. Milestone 1 added the pure Rust `msg-core` domain layer: validated identifiers and names, message envelopes, topics and partitions, consumer groups and subscriptions, delivery attempts, ACK/NACK commands, retry policy values, DLQ reason values, typed domain errors, serde support, and focused unit/property tests.
+This repository is a portfolio-oriented release candidate for the broker
+foundation, not a production broker service. The current goal is to make the
+local durable messaging path easy to inspect, run, and validate without
+overclaiming distributed-system guarantees.
 
-Milestone 2 adds `msg-broker` as a synchronous deterministic in-memory broker service. It supports topic creation, publish, consume, ACK, NACK, injected-time retry processing, lease expiry, and in-memory DLQ inspection. The broker has no async runtime, background worker, durable storage, HTTP/gRPC API, or TypeScript-owned broker semantics.
+## Problem
 
-Milestone 3 adds `msg-storage` as an independent synchronous local append-only log for durable message records. It uses framed JSON records, CRC32 checksums, fixed 20-digit segment names, zero-based gapless successful-append offsets, reopen recovery, and final-segment trailing-record repair. Broker delivery durability, ACK/NACK state, retry state, consumer cursors, pending delivery state, DLQ persistence, broker/storage wiring, APIs, retention, compaction, and fsync policy tuning remain deferred.
+FerrumQ explores the parts of a broker that are easiest to blur in early
+systems work:
 
-Milestone 4 adds `DurableBroker` in `msg-broker` as a local durable at-least-once delivery foundation while keeping `BrokerService` unchanged as the in-memory broker. Durable messages are stored through `msg-storage` under `<root>/messages`; topic metadata and delivery transitions are stored in `<root>/broker-state/events.jsonl`. Successfully published messages are recoverable after broker reopen, successfully ACKed messages are not redelivered after reopen, unACKed messages may be redelivered after reopen, and duplicate or stale delivery IDs fail as not found. The broker-state format and recovery rules are documented in [docs/BROKER_STATE_FORMAT.md](docs/BROKER_STATE_FORMAT.md). Consumers must be idempotent. This is local filesystem durability only, not clustering, replication, consensus, HTTP/gRPC API behavior, CLI/TUI broker semantics, or exactly-once delivery.
+- Clear separation between broker semantics and adapters.
+- Durable append-only local state with deterministic recovery behavior.
+- Explicit control-plane and data-plane boundaries.
+- At-least-once delivery with visible ACK/NACK and DLQ state.
+- Terminal tooling that exercises the broker without reimplementing it.
 
-Milestone 5 adds `msg-control-api`, an Axum HTTP control-plane adapter backed by local durable `DurableBroker` state, and wires `brokerd serve`. The API exposes health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection only. It intentionally does not expose HTTP publish, consume, ACK, or NACK data-plane endpoints. Endpoint shapes, deterministic topic ordering, duplicate topic behavior, unsupported route/method behavior, readiness semantics, and stable JSON error envelopes are documented in [docs/API.md](docs/API.md).
+## Architecture
 
-Milestone 6 adds a unary gRPC data-plane foundation while HTTP remains control-plane only. Protobuf contracts live in `msg-protocol` under `ferrumq.dataplane.v1`, `msg-data-plane` maps those DTOs to public `DurableBroker` publish, consume, ACK, and NACK APIs, and `brokerd serve-grpc` serves the adapter from local durable state. Delivery is local durable at-least-once, so consumers must be idempotent. The `idempotency_key` field is metadata-only and is not enforced for publish deduplication yet.
+- `msg-core`: validated domain types and message envelopes.
+- `msg-storage`: framed append-only partition logs with CRC32 recovery checks.
+- `msg-broker`: in-memory and local durable broker services.
+- `msg-control-api`: Axum HTTP control plane for health, readiness, status,
+  topics, DLQ inspection, and metrics.
+- `msg-protocol` and `msg-data-plane`: protobuf contracts and tonic gRPC
+  data-plane adapter for publish, consume, ACK, and NACK.
+- `msg-runtime`: `brokerd`, the local runtime binary for HTTP and gRPC serving.
+- `packages/cli`: `ferrumq` command-line adapter over HTTP and gRPC.
+- `packages/tui`: `ferrumq-tui`, a read-only Ink dashboard over HTTP.
 
-Milestone 7 adds the first usable TypeScript CLI. The binary is `ferrumq`, with `msg` kept as a compatibility alias. The CLI is an adapter only: HTTP for control-plane commands and unary gRPC for publish, consume, ACK, and NACK. Rust remains the source of broker behavior. CLI usage, defaults, JSON output wrappers, and deferred process-management scope are documented in [docs/CLI.md](docs/CLI.md). Streaming consume, generated public SDKs, auth, TLS, rate limiting, clustering, replication, exactly-once semantics, MaaS/multi-tenancy, and distributed broker behavior remain deferred.
+The design is a modular monolith with hexagonal boundaries. Broker behavior
+stays in Rust; TypeScript packages are adapters or client-side helpers.
 
-Milestone 8 adds the first usable TypeScript TUI. The binary is `ferrumq-tui`, implemented with Ink as a read-only dashboard over the HTTP control plane. It shows health, readiness, broker status, topic summaries, DLQ entries, the configured control URL, and the configured gRPC URL; it does not publish, consume, ACK, NACK, supervise broker processes, or implement broker semantics. TUI usage, key bindings, limits, and expected error behavior are documented in [docs/TUI.md](docs/TUI.md).
+## Current Capabilities
 
-Milestone 9 adds a focused observability foundation. `brokerd` initializes structured `tracing` logs from `RUST_LOG` and optional `FERRUMQ_LOG_FORMAT=compact|json`; HTTP, gRPC, durable broker, and storage paths record process-local counters through `msg-observability`; and the HTTP control plane exposes Prometheus text at `GET /metrics`. Metrics are local operational data, not dashboards, collectors, remote telemetry, auth, TLS, or TypeScript observability panels. Behavior and metric names are documented in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+- Local durable topic creation and deterministic topic listing.
+- Durable publish through unary gRPC.
+- Unary consume with leases and at-least-once delivery.
+- ACK, NACK, retry maintenance, and DLQ transitions.
+- Reopen recovery for published, ACKed, and in-flight local state.
+- HTTP health, readiness, broker status, topic, DLQ, and `/metrics` endpoints.
+- Structured `tracing` logs and process-local Prometheus counters.
+- TypeScript CLI smoke path for local broker interaction.
+- Read-only TUI for health, readiness, topic, DLQ, and status inspection.
 
-Start the local control-plane server:
+## Explicit Non-Goals
+
+FerrumQ currently provides local durable at-least-once delivery only. Consumers
+must be idempotent. The project does not provide exactly-once delivery,
+producer deduplication, clustering, replication, consensus, auth/RBAC, TLS,
+rate limiting, hosted telemetry, dashboards, multi-tenancy, MaaS behavior, or
+production daemon hardening.
+
+`idempotency_key` is metadata-only and is not enforced for publish
+deduplication. Message payloads are not logged by default and are not exported
+as metric labels.
+
+## Quickstart
+
+Install dependencies and build the workspace:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+cargo build --workspace
+```
+
+Use a local data directory for both demos:
+
+```sh
+mkdir -p ./.ferrumq
+```
+
+First, run the HTTP control-plane demo. Start the HTTP server:
 
 ```sh
 cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
 ```
 
-Start the local data-plane gRPC server:
+Create and inspect a topic:
 
 ```sh
-cargo run -p msg-runtime --bin brokerd -- serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090
+node packages/cli/dist/cli.js topic create orders --partitions 3
+node packages/cli/dist/cli.js topic list
+node packages/cli/dist/cli.js topic get orders
 ```
 
-Inspect local process metrics from the HTTP control plane:
+Inspect process-local HTTP metrics:
 
 ```sh
 curl http://127.0.0.1:8080/metrics
 ```
 
-## Architecture Direction
+Stop the HTTP process before starting the gRPC data-plane demo. The topic
+metadata remains on disk under `./.ferrumq`.
 
-- Modular monolith first, with explicit crate and package boundaries.
-- Hexagonal architecture with Rust domain logic isolated from future adapters.
-- Append-only log as the target persistence model.
-- At-least-once delivery as the initial reliability model.
-- Separate control plane and data plane.
-- Harness Engineering from the first commit.
+Start the gRPC server:
 
-## Local Validation
+```sh
+cargo run -p msg-runtime --bin brokerd -- serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090
+```
 
-Run the full local harness:
+Publish and consume a message:
+
+```sh
+node packages/cli/dist/cli.js publish orders --data '{"orderId":1}' --key account-1
+node packages/cli/dist/cli.js consume orders --group workers --max 1
+```
+
+ACK or NACK the returned delivery ID:
+
+```sh
+node packages/cli/dist/cli.js ack <delivery-id>
+node packages/cli/dist/cli.js nack <delivery-id> --reason poison
+```
+
+`brokerd serve` and `brokerd serve-grpc` are separate local processes. Each
+opens its own `DurableBroker` state at startup. A shared `--data-dir` persists
+state across restarts, but running processes do not live-reload each other's
+changes or share in-memory state. Do not expect an already-running HTTP process
+or TUI to show live gRPC-process changes. `/metrics` is also process-local; in
+the split-process setup, HTTP `/metrics` does not expose gRPC counters. A
+combined runtime or reload/sync mechanism is deferred.
+
+For a fuller walkthrough, see [docs/LOCAL_DEMO.md](docs/LOCAL_DEMO.md).
+
+## Validation
+
+The local release gate is:
 
 ```sh
 make ci
 ```
 
-Useful focused checks:
+Focused checks are available through Make targets:
 
 ```sh
-cargo fmt --all --check
-cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo nextest run --workspace
-cargo deny check
-pnpm install --frozen-lockfile
-pnpm format:check
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
-node packages/tui/dist/cli.js --version
-node packages/tui/dist/cli.js --help
-pnpm --filter @ferrumq/cli build
-node packages/cli/dist/cli.js --version
-node packages/cli/dist/cli.js --help
-node packages/cli/dist/cli.js topic --help
-node packages/cli/dist/cli.js publish --help
-cargo run -p msg-runtime --bin brokerd -- --version
-git diff --check
+make rust-fmt-check
+make rust-check
+make rust-clippy
+make rust-test
+make rust-nextest
+make rust-deny
+make ts-format-check
+make ts-lint
+make ts-typecheck
+make ts-test
+make ts-build
+make smoke
+make hygiene
 ```
 
-`cargo nextest run --workspace` and `cargo deny check` require local optional tools. `make audit` runs `cargo deny check` when `cargo-deny` is installed. Missing global audit tooling remains a non-breaking documented follow-up.
+`cargo deny check` can emit a known duplicate `hashbrown` warning. Treat it as
+non-fatal only when the command exits successfully.
+
+## Project Structure
+
+```txt
+crates/              Rust broker, storage, protocol, API, runtime, and tests
+packages/            TypeScript CLI, TUI, protocol helpers, and SDK placeholder
+docs/                Architecture, protocol, operation, release, and API docs
+.github/workflows/   CI entrypoint that runs the local harness
+```
+
+## Docs Index
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [HTTP Control API](docs/API.md)
+- [Protocol](docs/PROTOCOL.md)
+- [CLI](docs/CLI.md)
+- [TUI](docs/TUI.md)
+- [Observability](docs/OBSERVABILITY.md)
+- [Failure Model](docs/FAILURE_MODEL.md)
+- [Storage Format](docs/STORAGE_FORMAT.md)
+- [Broker State Format](docs/BROKER_STATE_FORMAT.md)
+- [Testing Strategy](docs/TESTING_STRATEGY.md)
+- [Local Demo](docs/LOCAL_DEMO.md)
+- [Release Checklist](docs/RELEASE_CHECKLIST.md)
+- [Milestones](docs/MILESTONES.md)
+- [ADRs](docs/ADR/)
+
+## Status
+
+Current local release status is `0.1.0`. Rust workspace packages, root
+TypeScript package metadata, `@ferrumq/*` package metadata, CLI version output,
+TUI version output, and `brokerd --version` are expected to remain aligned at
+`0.1.0` for this release candidate.

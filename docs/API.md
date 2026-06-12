@@ -1,9 +1,9 @@
 # HTTP Control API
 
-Milestone 5 exposes a local HTTP control plane backed by `DurableBroker`.
-Milestone 7 uses this API from the TypeScript `ferrumq` CLI for control-plane
-commands only. Milestone 9 adds `GET /metrics` as an operational Prometheus
-text endpoint for process-local counters.
+FerrumQ exposes a local HTTP control plane backed by `DurableBroker`. The
+TypeScript `ferrumq` CLI uses this API for control-plane commands only.
+`GET /metrics` is an operational Prometheus text endpoint for process-local
+counters.
 
 Start the server:
 
@@ -11,7 +11,14 @@ Start the server:
 cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
 ```
 
-This API is control-plane only. It manages and inspects local durable broker state. It does not provide HTTP publish, consume, ACK, or NACK endpoints. The TypeScript CLI uses unary gRPC for those data-plane commands. TypeScript TUI behavior, auth, TLS, rate limiting, observability export, clustering, replication, and exactly-once semantics are intentionally deferred.
+This API is control-plane only. It manages and inspects the local durable broker
+state opened by this HTTP process at startup. It does not provide HTTP publish,
+consume, ACK, or NACK endpoints. The TypeScript CLI uses unary gRPC for those
+data-plane commands. If a separate `brokerd serve-grpc` process uses the same
+`--data-dir`, state persists across restarts, but this HTTP process does not
+live-reload gRPC-process changes while both are running. TypeScript TUI
+behavior, auth, TLS, rate limiting, observability export, clustering,
+replication, and exactly-once semantics are intentionally deferred.
 
 All JSON responses, including API-owned error responses, use `application/json`. Endpoints with JSON request bodies require `Content-Type: application/json`. `GET /metrics` is the exception: it returns Prometheus text, not JSON.
 

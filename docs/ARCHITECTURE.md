@@ -76,6 +76,14 @@ the data-plane API for publish, consume, ACK, and NACK. If HTTP and gRPC run as
 separate processes, the HTTP metrics endpoint reports only the HTTP process;
 data-plane metrics aggregation is deferred.
 
+In the current runtime shape, `brokerd serve` and `brokerd serve-grpc` are also
+separate local processes with separate in-memory broker instances. Each opens
+`DurableBroker` state from `--data-dir` at startup. Sharing a data directory
+persists state across process restarts, but it does not provide live reload,
+cross-process synchronization, or live HTTP/TUI inspection of mutations made by
+an already-running gRPC process. A combined runtime or explicit reload/sync
+mechanism is deferred.
+
 ## Future Distributed Evolution
 
 FerrumQ can evolve into distributed components once local semantics are proven. Candidate future splits include runtime nodes, replicated storage, remote data plane APIs, and operator-facing control services. Those splits must come after stable ports, tests, and failure models exist.

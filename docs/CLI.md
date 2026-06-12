@@ -1,13 +1,11 @@
 # FerrumQ CLI
 
-Milestone 7 introduces the first usable TypeScript CLI. The public binary is
-`ferrumq`; `msg` remains a compatibility alias. The CLI is an adapter only:
-control-plane commands call the HTTP API and data-plane commands call unary
-gRPC. Broker behavior remains owned by Rust.
+The public TypeScript CLI binary is `ferrumq`; `msg` remains a compatibility
+alias. The CLI is an adapter only: control-plane commands call the HTTP API and
+data-plane commands call unary gRPC. Broker behavior remains owned by Rust.
 
-Milestone 8 adds a separate `ferrumq-tui` binary for read-only terminal
-inspection. It is documented in [TUI.md](TUI.md) and does not change the CLI
-command surface.
+The separate `ferrumq-tui` binary provides read-only terminal inspection. It is
+documented in [TUI.md](TUI.md) and does not change the CLI command surface.
 
 ## Defaults
 
@@ -46,8 +44,15 @@ clients.
 
 `broker version` runs `brokerd --version`. If `brokerd` is not on `PATH`, the
 CLI reports a short expected error. Broker process supervision commands are not
-implemented in Milestone 7; start `brokerd serve` and `brokerd serve-grpc`
-directly.
+implemented; start `brokerd serve` and `brokerd serve-grpc` directly.
+
+Those runtime commands start separate local processes. Each process opens its
+own `DurableBroker` state at startup. A shared `--data-dir` persists state
+across restarts, but it does not provide live shared in-memory state or
+live-reload between running HTTP and gRPC processes. For local demos, create
+topics through `brokerd serve`, stop that process, then start
+`brokerd serve-grpc` against the same data directory for publish, consume, ACK,
+and NACK commands.
 
 Control-plane commands:
 
@@ -63,8 +68,9 @@ ferrumq dlq list --topic orders
 ```
 
 `GET /metrics` is available on the HTTP control plane as an operational
-Prometheus endpoint. The CLI does not wrap it as a command in Milestone 9; use
-HTTP tooling such as `curl` when metrics text is needed.
+Prometheus endpoint. The CLI does not wrap it as a command; use HTTP tooling
+such as `curl` when metrics text is needed. In the split-process setup, HTTP
+`/metrics` reports only HTTP-process counters, not gRPC counters.
 
 Data-plane commands:
 
@@ -133,5 +139,5 @@ observability dashboards/export, clustering, replication, exactly-once
 semantics, and MaaS/multi-tenancy remain deferred. TypeScript process-level
 gRPC integration tests are also deferred because
 `brokerd serve-grpc --listen 127.0.0.1:0` does not expose the selected port;
-Milestone 7 relies on Rust in-process gRPC tests and mocked TypeScript client
-seams.
+the project relies on Rust in-process gRPC tests and mocked TypeScript client
+seams for that boundary.

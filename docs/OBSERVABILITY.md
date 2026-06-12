@@ -1,8 +1,8 @@
 # Observability
 
-Milestone 9 adds the first concrete observability foundation. It is local and
-process-scoped: structured logs use `tracing`, counters live in each process,
-and the HTTP control plane exposes Prometheus text at `GET /metrics`.
+FerrumQ observability is local and process-scoped: structured logs use
+`tracing`, counters live in each process, and the HTTP control plane exposes
+Prometheus text at `GET /metrics`.
 
 This is operational data for a local broker process. It is not hosted telemetry,
 not a dashboard, not a collector pipeline, and not an authentication boundary.
@@ -143,9 +143,11 @@ Storage counters:
 
 Metrics are process-local. If HTTP control and gRPC data-plane servers run as
 separate processes, `GET /metrics` on the HTTP process reports only the HTTP
-process counters. Rust in-process tests can inspect one registry because they
-run adapters in a single process. A separate data-plane metrics listener,
-remote scraping topology, and cross-process aggregation are deferred.
+process counters. It does not prove that the HTTP process has live-reloaded
+broker state mutations made by a separate gRPC process. Rust in-process tests
+can inspect one registry because they run adapters in a single process. A
+separate data-plane metrics listener, remote scraping topology, and
+cross-process aggregation are deferred.
 
 Deferred observability scope includes Grafana dashboards, OpenTelemetry
 collector/export pipelines, hosted telemetry, auth/TLS/rate limiting for
