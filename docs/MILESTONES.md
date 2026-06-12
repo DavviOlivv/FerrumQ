@@ -245,8 +245,44 @@ Deferred from Milestone 8:
 
 - Structured tracing.
 - Metrics endpoint.
-- Prometheus/Grafana compose.
-- OpenTelemetry integration.
+- Process-local Prometheus text counters.
+- Safe logging and low-cardinality metric labels.
+
+Status: implemented as a focused Rust observability foundation.
+
+Implemented scope:
+
+- `msg-observability` shared crate with tracing initialization, stable metric
+  names, process-local counters, helper recording functions, and Prometheus text
+  rendering.
+- `brokerd serve` and `brokerd serve-grpc` initialize tracing from `RUST_LOG`
+  with optional `FERRUMQ_LOG_FORMAT=compact|json`.
+- Startup spans/events for HTTP and gRPC runtime modes with operation and listen
+  address only.
+- `GET /metrics` on the HTTP control plane with Prometheus text content type.
+- HTTP control-plane handler spans and request/error counters.
+- gRPC data-plane spans and counters for `Publish`, `Consume`, `Ack`, `Nack`,
+  delivered messages, and sanitized RPC errors.
+- Durable broker spans/events and counters for open/recovery, topic creation,
+  publish, consume, delivery creation, ACK, NACK, retry maintenance, and DLQ
+  transitions.
+- Storage spans/events and counters for partition log open/recovery, append,
+  final trailing repair, and sanitized storage error kinds.
+- Low-cardinality metric labels limited to `method`, `route`, `status`, `code`,
+  and `kind`.
+- Tests for metric rendering and escaping, `/metrics`, control-plane create and
+  error counters, data-plane success/error counters, DLQ transition metrics, and
+  storage repair metrics.
+- Documentation in [OBSERVABILITY.md](OBSERVABILITY.md) and ADR
+  [0014](ADR/0014-observability-foundation.md).
+
+Deferred from Milestone 9:
+
+- Grafana dashboards, Prometheus/Grafana compose files, OpenTelemetry
+  collector/export pipeline, hosted telemetry, auth/TLS/rate limiting for
+  metrics, separate data-plane metrics listener, advanced TUI observability
+  panels, clustering/replication metrics, exactly-once telemetry, and
+  MaaS/multi-tenancy telemetry.
 
 ## Milestone 10: Hardening Review
 

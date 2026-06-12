@@ -13,12 +13,14 @@ use msg_core::{
     IdempotencyKey, MessageEnvelope, MessageId, MessagePayload, MessageTimestamp, PartitionKey,
     TopicName,
 };
+use msg_observability::metrics;
 use msg_protocol::ferrumq::dataplane::v1::{
     AckRequest, AckResponse, ConsumeRequest, ConsumeResponse, ConsumedMessage, NackRequest,
     NackResponse, PublishRequest, PublishResponse, ferrum_q_data_plane_server::FerrumQDataPlane,
 };
 use thiserror::Error;
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
+use tracing::{info, warn};
 
 pub use msg_protocol::ferrumq::dataplane::v1::ferrum_q_data_plane_server::FerrumQDataPlaneServer;
 
@@ -96,30 +98,115 @@ pub fn open_service(config: DataPlaneConfig) -> Result<DataPlaneService, DataPla
 
 #[tonic::async_trait]
 impl FerrumQDataPlane for DataPlaneService {
+    #[tracing::instrument(name = "data_plane.publish", skip_all)]
     async fn publish(
         &self,
         request: Request<PublishRequest>,
     ) -> Result<Response<PublishResponse>, Status> {
-        let request = request.into_inner();
+        let result = self.publish_inner(request.into_inner());
+        match &result {
+            Ok(response) => {
+                metrics::record_data_rpc_request("Publish", "ok");
+                metrics::record_data_publish("success");
+                info!(
+                    operation = "Publish",
+                    status = "ok",
+                    topic = response.topic.as_str(),
+                    partition = response.partition,
+                    offset = response.offset,
+                    message_id = response.message_id.as_str()
+                );
+            }
+            Err(status) => {
+                record_rpc_error("Publish", "publish", status);
+                metrics::record_data_publish("error");
+            }
+        }
+
+        result.map(Response::new)
+    }
+
+    #[tracing::instrument(name = "data_plane.consume", skip_all)]
+    async fn consume(
+        &self,
+        request: Request<ConsumeRequest>,
+    ) -> Result<Response<ConsumeResponse>, Status> {
+        let result = self.consume_inner(request.into_inner());
+        match &result {
+            Ok(response) => {
+                metrics::record_data_rpc_request("Consume", "ok");
+                metrics::record_data_consume("success");
+                metrics::record_data_messages_delivered(response.messages.len());
+                info!(
+                    operation = "Consume",
+                    status = "ok",
+                    delivered = response.messages.len()
+                );
+            }
+            Err(status) => {
+                record_rpc_error("Consume", "consume", status);
+                metrics::record_data_consume("error");
+            }
+        }
+
+        result.map(Response::new)
+    }
+
+    #[tracing::instrument(name = "data_plane.ack", skip_all)]
+    async fn ack(&self, request: Request<AckRequest>) -> Result<Response<AckResponse>, Status> {
+        let result = self.ack_inner(request.into_inner());
+        match &result {
+            Ok(()) => {
+                metrics::record_data_rpc_request("Ack", "ok");
+                metrics::record_data_ack("success");
+                info!(operation = "Ack", status = "ok");
+            }
+            Err(status) => {
+                record_rpc_error("Ack", "ack", status);
+                metrics::record_data_ack("error");
+            }
+        }
+
+        result.map(|()| Response::new(AckResponse {}))
+    }
+
+    #[tracing::instrument(name = "data_plane.nack", skip_all)]
+    async fn nack(&self, request: Request<NackRequest>) -> Result<Response<NackResponse>, Status> {
+        let result = self.nack_inner(request.into_inner());
+        match &result {
+            Ok(()) => {
+                metrics::record_data_rpc_request("Nack", "ok");
+                metrics::record_data_nack("success");
+                info!(operation = "Nack", status = "ok");
+            }
+            Err(status) => {
+                record_rpc_error("Nack", "nack", status);
+                metrics::record_data_nack("error");
+            }
+        }
+
+        result.map(|()| Response::new(NackResponse {}))
+    }
+}
+
+impl DataPlaneService {
+    #[tracing::instrument(name = "data_plane.publish", skip_all)]
+    fn publish_inner(&self, request: PublishRequest) -> Result<PublishResponse, Status> {
         let topic = topic_name(&request.topic)?;
         let envelope = publish_envelope(request)?;
 
         let published =
             self.with_broker(|broker| broker.publish(PublishCommand::new(topic, envelope)))?;
 
-        Ok(Response::new(PublishResponse {
+        Ok(PublishResponse {
             topic: published.topic().as_str().to_owned(),
             partition: published.partition_id().value(),
             offset: published.offset().value(),
             message_id: published.message_id().as_str().to_owned(),
-        }))
+        })
     }
 
-    async fn consume(
-        &self,
-        request: Request<ConsumeRequest>,
-    ) -> Result<Response<ConsumeResponse>, Status> {
-        let request = request.into_inner();
+    fn consume_inner(&self, request: ConsumeRequest) -> Result<ConsumeResponse, Status> {
         let topic = topic_name(&request.topic)?;
         let consumer_group_id = consumer_group_id(&request.consumer_group)?;
         let consumer_id = consumer_id(&request.consumer_id)?;
@@ -143,26 +230,20 @@ impl FerrumQDataPlane for DataPlaneService {
             broker.consume(command)
         })?;
 
-        Ok(Response::new(ConsumeResponse {
+        Ok(ConsumeResponse {
             messages: messages.into_iter().map(consumed_message).collect(),
-        }))
+        })
     }
 
-    async fn ack(&self, request: Request<AckRequest>) -> Result<Response<AckResponse>, Status> {
-        let request = request.into_inner();
+    fn ack_inner(&self, request: AckRequest) -> Result<(), Status> {
         let delivery_id = delivery_id(&request.delivery_id)?;
         let consumer_id = consumer_id(&request.consumer_id)?;
         let timestamp = current_unix_millis();
 
-        self.with_broker(|broker| {
-            broker.ack(AckCommand::new(delivery_id, consumer_id, timestamp))
-        })?;
-
-        Ok(Response::new(AckResponse {}))
+        self.with_broker(|broker| broker.ack(AckCommand::new(delivery_id, consumer_id, timestamp)))
     }
 
-    async fn nack(&self, request: Request<NackRequest>) -> Result<Response<NackResponse>, Status> {
-        let request = request.into_inner();
+    fn nack_inner(&self, request: NackRequest) -> Result<(), Status> {
         let delivery_id = delivery_id(&request.delivery_id)?;
         let consumer_id = consumer_id(&request.consumer_id)?;
         let timestamp = current_unix_millis();
@@ -172,9 +253,36 @@ impl FerrumQDataPlane for DataPlaneService {
             NackCommand::with_reason(delivery_id, consumer_id, request.reason, timestamp)
         };
 
-        self.with_broker(|broker| broker.nack(command))?;
+        self.with_broker(|broker| broker.nack(command))
+    }
+}
 
-        Ok(Response::new(NackResponse {}))
+fn record_rpc_error(method: &'static str, operation: &'static str, status: &Status) {
+    let code = grpc_code(status.code());
+    metrics::record_data_rpc_request(method, code);
+    metrics::record_data_rpc_error(method, code);
+    warn!(operation, status = code);
+}
+
+fn grpc_code(code: Code) -> &'static str {
+    match code {
+        Code::Ok => "ok",
+        Code::Cancelled => "cancelled",
+        Code::Unknown => "unknown",
+        Code::InvalidArgument => "invalid_argument",
+        Code::DeadlineExceeded => "deadline_exceeded",
+        Code::NotFound => "not_found",
+        Code::AlreadyExists => "already_exists",
+        Code::PermissionDenied => "permission_denied",
+        Code::ResourceExhausted => "resource_exhausted",
+        Code::FailedPrecondition => "failed_precondition",
+        Code::Aborted => "aborted",
+        Code::OutOfRange => "out_of_range",
+        Code::Unimplemented => "unimplemented",
+        Code::Internal => "internal",
+        Code::Unavailable => "unavailable",
+        Code::DataLoss => "data_loss",
+        Code::Unauthenticated => "unauthenticated",
     }
 }
 

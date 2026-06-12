@@ -10,8 +10,10 @@ axum = "0.8"
 clap.workspace = true
 msg-control-api = { path = "../msg-control-api" }
 msg-data-plane = { path = "../msg-data-plane" }
+msg-observability = { path = "../msg-observability" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tonic = { workspace = true, features = ["transport"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

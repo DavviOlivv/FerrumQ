@@ -11,9 +11,11 @@ path = "src/lib.rs"
 [dependencies]
 msg-broker = { path = "../msg-broker" }
 msg-core = { path = "../msg-core" }
+msg-observability = { path = "../msg-observability" }
 msg-protocol = { path = "../msg-protocol" }
 thiserror = "2"
 tonic.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 msg-storage = { path = "../msg-storage" }

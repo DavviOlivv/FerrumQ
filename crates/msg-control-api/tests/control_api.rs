@@ -12,6 +12,7 @@ use msg_core::{
     ConsumerGroupId, ConsumerId, ContentType, EventSource, EventType, MessageId, MessagePayload,
     MessageTimestamp, RetryPolicy, TopicConfig, TopicName,
 };
+use msg_observability::{PROMETHEUS_CONTENT_TYPE, metric_names, metrics};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -38,10 +39,7 @@ fn empty_request(method: &str, uri: &str) -> Request<Body> {
 }
 
 async fn send_response(router: &Router, request: Request<Body>) -> (StatusCode, HeaderMap, Value) {
-    let response = router.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let (status, headers, body) = send_raw(router, request).await;
     let body = serde_json::from_slice(&body).unwrap();
     (status, headers, body)
 }
@@ -49,6 +47,14 @@ async fn send_response(router: &Router, request: Request<Body>) -> (StatusCode, 
 async fn send(router: &Router, request: Request<Body>) -> (StatusCode, Value) {
     let (status, _headers, body) = send_response(router, request).await;
     (status, body)
+}
+
+async fn send_raw(router: &Router, request: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, headers, body.to_vec())
 }
 
 fn assert_json_content_type(headers: &HeaderMap) {
@@ -132,6 +138,126 @@ async fn health_and_readiness_return_ok() {
     let (status, body) = send(&router, empty_request("GET", "/ready")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "status": "ready" }));
+}
+
+#[tokio::test]
+async fn metrics_endpoint_returns_prometheus_text_with_known_names() {
+    let root = TempDir::new().unwrap();
+    let router = router_with_temp_state(&root);
+
+    let (status, headers, body) = send_raw(&router, empty_request("GET", "/metrics")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(content_type, PROMETHEUS_CONTENT_TYPE);
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains(metric_names::CONTROL_HTTP_REQUESTS_TOTAL));
+    assert!(body.contains(metric_names::CONTROL_TOPICS_CREATED_TOTAL));
+    assert!(body.contains(metric_names::BROKER_TOPICS_CREATED_TOTAL));
+}
+
+#[tokio::test]
+async fn topic_creation_and_errors_update_control_metrics() {
+    let root = TempDir::new().unwrap();
+    let router = router_with_temp_state(&root);
+    let created_before = metrics::counter_value(
+        metric_names::CONTROL_TOPICS_CREATED_TOTAL,
+        &[("status", "success")],
+    );
+    let conflict_before = metrics::counter_value(
+        metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+        &[
+            ("method", "POST"),
+            ("route", "/v1/topics"),
+            ("status", "409"),
+            ("code", "TOPIC_ALREADY_EXISTS"),
+        ],
+    );
+    let validation_before = metrics::counter_value(
+        metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+        &[
+            ("method", "POST"),
+            ("route", "/v1/topics"),
+            ("status", "400"),
+            ("code", "VALIDATION_ERROR"),
+        ],
+    );
+
+    let (status, _body) = send(
+        &router,
+        json_request(
+            "POST",
+            "/v1/topics",
+            json!({ "name": "orders", "partitions": 1 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _body) = send(
+        &router,
+        json_request(
+            "POST",
+            "/v1/topics",
+            json!({ "name": "orders", "partitions": 1 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _body) = send(
+        &router,
+        json_request(
+            "POST",
+            "/v1/topics",
+            json!({ "name": "bad topic", "partitions": 1 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let created_after = metrics::counter_value(
+        metric_names::CONTROL_TOPICS_CREATED_TOTAL,
+        &[("status", "success")],
+    );
+    let conflict_after = metrics::counter_value(
+        metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+        &[
+            ("method", "POST"),
+            ("route", "/v1/topics"),
+            ("status", "409"),
+            ("code", "TOPIC_ALREADY_EXISTS"),
+        ],
+    );
+    let validation_after = metrics::counter_value(
+        metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+        &[
+            ("method", "POST"),
+            ("route", "/v1/topics"),
+            ("status", "400"),
+            ("code", "VALIDATION_ERROR"),
+        ],
+    );
+
+    assert!(created_after > created_before);
+    assert!(conflict_after > conflict_before);
+    assert!(validation_after > validation_before);
+}
+
+#[tokio::test]
+async fn metrics_output_does_not_include_message_payloads() {
+    let root = TempDir::new().unwrap();
+    let router = seed_dlq_router(&root);
+
+    let (status, _headers, body) = send_raw(&router, empty_request("GET", "/metrics")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let body = String::from_utf8(body).unwrap();
+    assert!(!body.contains(r#"{"ok":true}"#));
+    assert!(!body.contains("payload"));
 }
 
 #[tokio::test]

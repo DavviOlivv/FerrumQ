@@ -62,6 +62,10 @@ ferrumq dlq list
 ferrumq dlq list --topic orders
 ```
 
+`GET /metrics` is available on the HTTP control plane as an operational
+Prometheus endpoint. The CLI does not wrap it as a command in Milestone 9; use
+HTTP tooling such as `curl` when metrics text is needed.
+
 Data-plane commands:
 
 ```sh
@@ -124,9 +128,10 @@ Error output is currently human text on stderr even when `--json` is set.
 ## Deferred Scope
 
 The TypeScript CLI does not start, supervise, or embed the broker. Public SDK,
-auth/RBAC, TLS, streaming consume, rate limiting, observability
-dashboards/export, clustering, replication, exactly-once semantics, and
-MaaS/multi-tenancy remain deferred. TypeScript process-level gRPC integration
-tests are also deferred because `brokerd serve-grpc --listen 127.0.0.1:0` does
-not expose the selected port; Milestone 7 relies on Rust in-process gRPC tests
-and mocked TypeScript client seams.
+auth/RBAC, TLS, streaming consume, rate limiting, metrics commands,
+observability dashboards/export, clustering, replication, exactly-once
+semantics, and MaaS/multi-tenancy remain deferred. TypeScript process-level
+gRPC integration tests are also deferred because
+`brokerd serve-grpc --listen 127.0.0.1:0` does not expose the selected port;
+Milestone 7 relies on Rust in-process gRPC tests and mocked TypeScript client
+seams.

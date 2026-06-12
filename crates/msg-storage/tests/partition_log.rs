@@ -6,6 +6,7 @@ use msg_core::{
     ContentType, EventSource, EventType, MessageEnvelope, MessageId, MessagePayload,
     MessageTimestamp, Offset, PartitionId, TopicName,
 };
+use msg_observability::{metric_names, metrics};
 use msg_storage::{LogConfig, PartitionLog, StorageError, StoredMessageRecord};
 use tempfile::TempDir;
 
@@ -546,6 +547,10 @@ fn recovers_from_truncated_final_checksum_header() {
 #[test]
 fn recovers_from_truncated_final_payload_body() {
     let root = TempDir::new().unwrap();
+    let repair_before = metrics::counter_value(
+        metric_names::STORAGE_TRAILING_REPAIRS_TOTAL,
+        &[("kind", "truncated_payload")],
+    );
     {
         let mut log = open_log(&root, 1024 * 1024);
         append_messages(&mut log, 3);
@@ -559,6 +564,12 @@ fn recovers_from_truncated_final_payload_body() {
     assert_record_offsets(&recovered.read_from(Offset::new(0), 10).unwrap(), &[0, 1]);
     assert_eq!(recovered.next_offset(), Offset::new(2));
     assert_eq!(file_len(&path), starts[2]);
+    assert!(
+        metrics::counter_value(
+            metric_names::STORAGE_TRAILING_REPAIRS_TOTAL,
+            &[("kind", "truncated_payload")]
+        ) > repair_before
+    );
 }
 
 #[test]

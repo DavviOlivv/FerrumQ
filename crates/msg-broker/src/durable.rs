@@ -9,9 +9,11 @@ use msg_core::{
     ConsumerGroupId, ConsumerId, DeadLetterReason, DeliveryId, MessageEnvelope, MessageTimestamp,
     Offset, PartitionId, RetryPolicy, Topic, TopicName,
 };
+use msg_observability::metrics;
 use msg_storage::{LogConfig, PartitionLog as StoragePartitionLog, StoredMessageRecord};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{info, info_span, warn};
 
 use crate::{
     broker::BrokerConfig,
@@ -274,28 +276,55 @@ impl DurableBroker {
     /// [`DurableBrokerError::StateCorruption`]; one final incomplete line is
     /// truncated and ignored.
     pub fn open(config: DurableBrokerConfig) -> DurableBrokerResult<Self> {
-        fs::create_dir_all(&config.root_dir)?;
+        let span = info_span!("durable_broker.open", operation = "open");
+        let _guard = span.enter();
 
-        let state_dir = config.root_dir.join("broker-state");
-        fs::create_dir_all(&state_dir)?;
-        let state_path = state_dir.join("events.jsonl");
-        let events = recover_state_events(&state_path)?;
-        let state_log = StateLog::open(&state_path)?;
+        let result = (|| {
+            fs::create_dir_all(&config.root_dir)?;
 
-        let mut broker = Self {
-            config,
-            topics: BTreeMap::new(),
-            state: DurableDeliveryState::default(),
-            state_log,
-        };
+            let state_dir = config.root_dir.join("broker-state");
+            fs::create_dir_all(&state_dir)?;
+            let state_path = state_dir.join("events.jsonl");
+            let events = recover_state_events(&state_path)?;
+            let recovered_events = events.len();
+            let state_log = StateLog::open(&state_path)?;
 
-        for event in events {
-            broker.apply_recovered_event(event)?;
+            let mut broker = Self {
+                config,
+                topics: BTreeMap::new(),
+                state: DurableDeliveryState::default(),
+                state_log,
+            };
+
+            for event in events {
+                broker.apply_recovered_event(event)?;
+            }
+            broker.recover_round_robin_state()?;
+            broker.release_recovered_pending();
+
+            info!(
+                operation = "open",
+                status = "success",
+                topics = broker.topics.len(),
+                dlq_entries = broker.state.dead_letters.len(),
+                recovered_events
+            );
+            Ok(broker)
+        })();
+
+        match &result {
+            Ok(_) => metrics::record_broker_open("success"),
+            Err(error) => {
+                metrics::record_broker_open("error");
+                warn!(
+                    operation = "open",
+                    status = "error",
+                    kind = durable_error_kind(error)
+                );
+            }
         }
-        broker.recover_round_robin_state()?;
-        broker.release_recovered_pending();
 
-        Ok(broker)
+        result
     }
 
     /// Creates topic metadata and opens its durable partition logs.
@@ -304,21 +333,56 @@ impl DurableBroker {
     /// the topic becomes visible in memory. Recreating a recovered topic returns
     /// [`BrokerError::TopicAlreadyExists`].
     pub fn create_topic(&mut self, command: CreateTopicCommand) -> DurableBrokerResult<Topic> {
-        let topic = Topic::new(command.name().clone(), command.config());
-        if self.topics.contains_key(topic.name()) {
-            return Err(BrokerError::TopicAlreadyExists {
-                topic: topic.name().clone(),
+        let topic_name = command.name().clone();
+        let partitions = command.config().partition_count();
+        let span = info_span!(
+            "durable_broker.create_topic",
+            operation = "create_topic",
+            topic = %topic_name,
+            partitions
+        );
+        let _guard = span.enter();
+
+        let result = (|| {
+            let topic = Topic::new(command.name().clone(), command.config());
+            if self.topics.contains_key(topic.name()) {
+                return Err(BrokerError::TopicAlreadyExists {
+                    topic: topic.name().clone(),
+                }
+                .into());
             }
-            .into());
+
+            let durable_topic = self.open_topic_logs(topic.clone())?;
+            self.state_log.append(&BrokerStateEvent::TopicCreated {
+                topic: topic.clone(),
+            })?;
+            self.topics.insert(topic.name().clone(), durable_topic);
+
+            Ok(topic)
+        })();
+
+        match &result {
+            Ok(topic) => {
+                metrics::record_broker_topic_create("success");
+                info!(
+                    operation = "create_topic",
+                    status = "success",
+                    topic = %topic.name(),
+                    partitions = topic.partition_count()
+                );
+            }
+            Err(error) => {
+                metrics::record_broker_topic_create("error");
+                warn!(
+                    operation = "create_topic",
+                    status = "error",
+                    topic = %topic_name,
+                    kind = durable_error_kind(error)
+                );
+            }
         }
 
-        let durable_topic = self.open_topic_logs(topic.clone())?;
-        self.state_log.append(&BrokerStateEvent::TopicCreated {
-            topic: topic.clone(),
-        })?;
-        self.topics.insert(topic.name().clone(), durable_topic);
-
-        Ok(topic)
+        result
     }
 
     /// Lists topics in deterministic topic-name order.
@@ -360,32 +424,70 @@ impl DurableBroker {
     /// append fails, no durable broker metadata is advanced and no phantom
     /// message is exposed by recovery.
     pub fn publish(&mut self, command: PublishCommand) -> DurableBrokerResult<PublishedMessage> {
-        let (topic_name, envelope) = command.into_parts();
-        let durable_topic =
-            self.topics
-                .get_mut(&topic_name)
-                .ok_or_else(|| BrokerError::TopicNotFound {
-                    topic: topic_name.clone(),
-                })?;
+        let topic_for_log = command.topic().clone();
+        let message_id_for_log = command.envelope().id().clone();
+        let span = info_span!(
+            "durable_broker.publish",
+            operation = "publish",
+            topic = %topic_for_log,
+            message_id = %message_id_for_log
+        );
+        let _guard = span.enter();
 
-        let should_advance_round_robin = envelope.partition_key().is_none();
-        let partition_id = select_durable_partition(durable_topic, &envelope);
-        let message_id = envelope.id().clone();
-        let offset = durable_topic
-            .partition_log_mut(partition_id)
-            .expect("durable topic logs are opened from Topic partition ids")
-            .append(envelope)?;
+        let result = (|| {
+            let (topic_name, envelope) = command.into_parts();
+            let durable_topic =
+                self.topics
+                    .get_mut(&topic_name)
+                    .ok_or_else(|| BrokerError::TopicNotFound {
+                        topic: topic_name.clone(),
+                    })?;
 
-        if should_advance_round_robin {
-            durable_topic.advance_round_robin_partition();
+            let should_advance_round_robin = envelope.partition_key().is_none();
+            let partition_id = select_durable_partition(durable_topic, &envelope);
+            let message_id = envelope.id().clone();
+            let offset = durable_topic
+                .partition_log_mut(partition_id)
+                .expect("durable topic logs are opened from Topic partition ids")
+                .append(envelope)?;
+
+            if should_advance_round_robin {
+                durable_topic.advance_round_robin_partition();
+            }
+
+            Ok(PublishedMessage::new(
+                topic_name,
+                partition_id,
+                offset,
+                message_id,
+            ))
+        })();
+
+        match &result {
+            Ok(message) => {
+                metrics::record_broker_publish("success");
+                info!(
+                    operation = "publish",
+                    status = "success",
+                    topic = %message.topic(),
+                    partition = message.partition_id().value(),
+                    offset = message.offset().value(),
+                    message_id = %message.message_id()
+                );
+            }
+            Err(error) => {
+                metrics::record_broker_publish("error");
+                warn!(
+                    operation = "publish",
+                    status = "error",
+                    topic = %topic_for_log,
+                    message_id = %message_id_for_log,
+                    kind = durable_error_kind(error)
+                );
+            }
         }
 
-        Ok(PublishedMessage::new(
-            topic_name,
-            partition_id,
-            offset,
-            message_id,
-        ))
+        result
     }
 
     /// Consumes up to `max_messages` available messages for a consumer group.
@@ -399,37 +501,93 @@ impl DurableBroker {
         &mut self,
         command: ConsumeCommand,
     ) -> DurableBrokerResult<Vec<ConsumedMessage>> {
-        if !self.topics.contains_key(command.topic()) {
-            return Err(BrokerError::TopicNotFound {
-                topic: command.topic().clone(),
+        let topic_for_log = command.topic().clone();
+        let consumer_group_for_log = command.consumer_group_id().clone();
+        let consumer_for_log = command.consumer_id().clone();
+        let max_messages = command.max_messages();
+        let span = info_span!(
+            "durable_broker.consume",
+            operation = "consume",
+            topic = %topic_for_log,
+            consumer_group = %consumer_group_for_log,
+            consumer_id = %consumer_for_log,
+            max_messages
+        );
+        let _guard = span.enter();
+
+        let result = (|| {
+            if !self.topics.contains_key(command.topic()) {
+                return Err(BrokerError::TopicNotFound {
+                    topic: command.topic().clone(),
+                }
+                .into());
             }
-            .into());
+
+            if command.max_messages() == 0 {
+                return Ok(Vec::new());
+            }
+
+            let selected = self.select_available_deliveries(&command)?;
+            if selected.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let deliveries = selected
+                .iter()
+                .map(|selection| selection.event.clone())
+                .collect();
+            self.state_log
+                .append(&BrokerStateEvent::MessagesConsumed { deliveries })?;
+
+            for selection in &selected {
+                self.apply_consumed_delivery(&selection.event);
+            }
+
+            Ok(selected
+                .into_iter()
+                .map(|selection| selection.message)
+                .collect())
+        })();
+
+        match &result {
+            Ok(messages) => {
+                metrics::record_broker_consume("success");
+                metrics::record_broker_deliveries_created(messages.len());
+                info!(
+                    operation = "consume",
+                    status = "success",
+                    topic = %topic_for_log,
+                    consumer_group = %consumer_group_for_log,
+                    consumer_id = %consumer_for_log,
+                    delivered = messages.len()
+                );
+                for message in messages {
+                    info!(
+                        operation = "delivery_created",
+                        topic = %message.topic(),
+                        partition = message.partition_id().value(),
+                        offset = message.offset().value(),
+                        message_id = %message.envelope().id(),
+                        delivery_id = %message.delivery_id(),
+                        consumer_group = %message.consumer_group_id(),
+                        consumer_id = %message.consumer_id()
+                    );
+                }
+            }
+            Err(error) => {
+                metrics::record_broker_consume("error");
+                warn!(
+                    operation = "consume",
+                    status = "error",
+                    topic = %topic_for_log,
+                    consumer_group = %consumer_group_for_log,
+                    consumer_id = %consumer_for_log,
+                    kind = durable_error_kind(error)
+                );
+            }
         }
 
-        if command.max_messages() == 0 {
-            return Ok(Vec::new());
-        }
-
-        let selected = self.select_available_deliveries(&command)?;
-        if selected.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let deliveries = selected
-            .iter()
-            .map(|selection| selection.event.clone())
-            .collect();
-        self.state_log
-            .append(&BrokerStateEvent::MessagesConsumed { deliveries })?;
-
-        for selection in &selected {
-            self.apply_consumed_delivery(&selection.event);
-        }
-
-        Ok(selected
-            .into_iter()
-            .map(|selection| selection.message)
-            .collect())
+        result
     }
 
     /// ACKs a pending delivery.
@@ -439,23 +597,59 @@ impl DurableBroker {
     /// ACK-after-NACK, and ACK-after-DLQ delivery IDs return
     /// [`BrokerError::DeliveryNotFound`].
     pub fn ack(&mut self, command: AckCommand) -> DurableBrokerResult<()> {
-        let pending = self
-            .pending_for_command(command.delivery_id(), command.consumer_id())?
-            .clone();
-        let event = BrokerStateEvent::MessageAcked {
-            delivery_id: command.delivery_id().clone(),
-            consumer_id: command.consumer_id().clone(),
-            topic: pending.message_ref.topic.clone(),
-            partition_id: pending.message_ref.partition_id,
-            offset: pending.message_ref.offset,
-            consumer_group_id: pending.consumer_group_id.clone(),
-            timestamp: command.timestamp(),
-        };
+        let delivery_id_for_log = command.delivery_id().clone();
+        let consumer_for_log = command.consumer_id().clone();
+        let span = info_span!(
+            "durable_broker.ack",
+            operation = "ack",
+            delivery_id = %delivery_id_for_log,
+            consumer_id = %consumer_for_log
+        );
+        let _guard = span.enter();
 
-        self.state_log.append(&event)?;
-        self.apply_ack(command.delivery_id(), pending);
+        let result = (|| {
+            let pending = self
+                .pending_for_command(command.delivery_id(), command.consumer_id())?
+                .clone();
+            let event = BrokerStateEvent::MessageAcked {
+                delivery_id: command.delivery_id().clone(),
+                consumer_id: command.consumer_id().clone(),
+                topic: pending.message_ref.topic.clone(),
+                partition_id: pending.message_ref.partition_id,
+                offset: pending.message_ref.offset,
+                consumer_group_id: pending.consumer_group_id.clone(),
+                timestamp: command.timestamp(),
+            };
 
-        Ok(())
+            self.state_log.append(&event)?;
+            self.apply_ack(command.delivery_id(), pending);
+
+            Ok(())
+        })();
+
+        match &result {
+            Ok(()) => {
+                metrics::record_broker_ack("success");
+                info!(
+                    operation = "ack",
+                    status = "success",
+                    delivery_id = %delivery_id_for_log,
+                    consumer_id = %consumer_for_log
+                );
+            }
+            Err(error) => {
+                metrics::record_broker_ack("error");
+                warn!(
+                    operation = "ack",
+                    status = "error",
+                    delivery_id = %delivery_id_for_log,
+                    consumer_id = %consumer_for_log,
+                    kind = durable_error_kind(error)
+                );
+            }
+        }
+
+        result
     }
 
     /// NACKs a pending delivery and schedules retry or DLQ routing.
@@ -466,42 +660,83 @@ impl DurableBroker {
     /// stale, NACK-after-ACK, and NACK-after-DLQ delivery IDs return
     /// [`BrokerError::DeliveryNotFound`].
     pub fn nack(&mut self, command: NackCommand) -> DurableBrokerResult<()> {
-        let pending = self
-            .pending_for_command(command.delivery_id(), command.consumer_id())?
-            .clone();
-        let reason = DeadLetterReason::Manual(
-            command
-                .reason()
-                .map_or_else(|| "nack".to_owned(), ToOwned::to_owned),
+        let delivery_id_for_log = command.delivery_id().clone();
+        let consumer_for_log = command.consumer_id().clone();
+        let span = info_span!(
+            "durable_broker.nack",
+            operation = "nack",
+            delivery_id = %delivery_id_for_log,
+            consumer_id = %consumer_for_log
         );
-        let computed = self.compute_pending_outcome(
-            &pending,
-            self.config.broker_config.retry_policy(),
-            command.timestamp(),
-            reason.clone(),
-        )?;
-        let event = BrokerStateEvent::MessageNacked {
-            delivery_id: command.delivery_id().clone(),
-            consumer_id: command.consumer_id().clone(),
-            topic: pending.message_ref.topic.clone(),
-            partition_id: pending.message_ref.partition_id,
-            offset: pending.message_ref.offset,
-            consumer_group_id: pending.consumer_group_id.clone(),
-            attempt_number: pending.attempt_number,
-            timestamp: command.timestamp(),
-            reason,
-            outcome: computed.outcome.clone(),
-        };
+        let _guard = span.enter();
 
-        self.state_log.append(&event)?;
-        self.apply_pending_outcome(
-            command.delivery_id(),
-            pending,
-            &computed.outcome,
-            computed.dead_letter,
-        )?;
+        let result = (|| {
+            let pending = self
+                .pending_for_command(command.delivery_id(), command.consumer_id())?
+                .clone();
+            let reason = DeadLetterReason::Manual(
+                command
+                    .reason()
+                    .map_or_else(|| "nack".to_owned(), ToOwned::to_owned),
+            );
+            let computed = self.compute_pending_outcome(
+                &pending,
+                self.config.broker_config.retry_policy(),
+                command.timestamp(),
+                reason.clone(),
+            )?;
+            let event = BrokerStateEvent::MessageNacked {
+                delivery_id: command.delivery_id().clone(),
+                consumer_id: command.consumer_id().clone(),
+                topic: pending.message_ref.topic.clone(),
+                partition_id: pending.message_ref.partition_id,
+                offset: pending.message_ref.offset,
+                consumer_group_id: pending.consumer_group_id.clone(),
+                attempt_number: pending.attempt_number,
+                timestamp: command.timestamp(),
+                reason,
+                outcome: computed.outcome.clone(),
+            };
+            let dead_lettered = computed.dead_letter.is_some();
 
-        Ok(())
+            self.state_log.append(&event)?;
+            self.apply_pending_outcome(
+                command.delivery_id(),
+                pending,
+                &computed.outcome,
+                computed.dead_letter,
+            )?;
+
+            Ok(dead_lettered)
+        })();
+
+        match &result {
+            Ok(dead_lettered) => {
+                metrics::record_broker_nack("success");
+                if *dead_lettered {
+                    metrics::record_broker_dlq_transition("nack", 1);
+                }
+                info!(
+                    operation = "nack",
+                    status = "success",
+                    delivery_id = %delivery_id_for_log,
+                    consumer_id = %consumer_for_log,
+                    dead_lettered = *dead_lettered
+                );
+            }
+            Err(error) => {
+                metrics::record_broker_nack("error");
+                warn!(
+                    operation = "nack",
+                    status = "error",
+                    delivery_id = %delivery_id_for_log,
+                    consumer_id = %consumer_for_log,
+                    kind = durable_error_kind(error)
+                );
+            }
+        }
+
+        result.map(|_dead_lettered| ())
     }
 
     /// Applies deterministic retry maintenance at the injected timestamp.
@@ -510,95 +745,129 @@ impl DurableBroker {
     /// offsets, then is appended and flushed before in-memory retry, pending,
     /// or DLQ state is mutated.
     pub fn retry_ready(&mut self, now: MessageTimestamp) -> DurableBrokerResult<RetrySummary> {
-        let expired_pending: Vec<_> = self
-            .state
-            .pending
-            .iter()
-            .filter(|(_delivery_id, pending)| pending.lease_expires_at <= now)
-            .map(|(delivery_id, pending)| (delivery_id.clone(), pending.clone()))
-            .collect();
-        let lease_expired = expired_pending.len();
+        let span = info_span!(
+            "durable_broker.retry_ready",
+            operation = "retry_ready",
+            now_unix_ms = now.as_unix_millis()
+        );
+        let _guard = span.enter();
 
-        let mut expired_outcomes = Vec::with_capacity(expired_pending.len());
-        let mut computed_outcomes = Vec::with_capacity(expired_pending.len());
-        let mut made_available: Vec<_> = self
-            .ready_retry_entries(now)
-            .into_iter()
-            .map(|(consumer_group_id, message_ref)| RetryAvailableEvent {
-                consumer_group_id,
-                topic: message_ref.topic,
-                partition_id: message_ref.partition_id,
-                offset: message_ref.offset,
-            })
-            .collect();
+        let result = (|| {
+            let expired_pending: Vec<_> = self
+                .state
+                .pending
+                .iter()
+                .filter(|(_delivery_id, pending)| pending.lease_expires_at <= now)
+                .map(|(delivery_id, pending)| (delivery_id.clone(), pending.clone()))
+                .collect();
+            let lease_expired = expired_pending.len();
 
-        let mut dead_lettered = 0;
-        for (delivery_id, pending) in expired_pending {
-            let reason = DeadLetterReason::Expired;
-            let computed = self.compute_pending_outcome(
-                &pending,
-                self.config.broker_config.retry_policy(),
-                now,
-                reason.clone(),
-            )?;
-            if matches!(&computed.outcome, DeliveryOutcome::DeadLettered { .. }) {
-                dead_lettered += 1;
-            }
-            if let DeliveryOutcome::RetryScheduled { ready_at } = &computed.outcome
-                && *ready_at <= now
-            {
-                made_available.push(RetryAvailableEvent {
-                    consumer_group_id: pending.consumer_group_id.clone(),
+            let mut expired_outcomes = Vec::with_capacity(expired_pending.len());
+            let mut computed_outcomes = Vec::with_capacity(expired_pending.len());
+            let mut made_available: Vec<_> = self
+                .ready_retry_entries(now)
+                .into_iter()
+                .map(|(consumer_group_id, message_ref)| RetryAvailableEvent {
+                    consumer_group_id,
+                    topic: message_ref.topic,
+                    partition_id: message_ref.partition_id,
+                    offset: message_ref.offset,
+                })
+                .collect();
+
+            let mut dead_lettered = 0;
+            for (delivery_id, pending) in expired_pending {
+                let reason = DeadLetterReason::Expired;
+                let computed = self.compute_pending_outcome(
+                    &pending,
+                    self.config.broker_config.retry_policy(),
+                    now,
+                    reason.clone(),
+                )?;
+                if matches!(&computed.outcome, DeliveryOutcome::DeadLettered { .. }) {
+                    dead_lettered += 1;
+                }
+                if let DeliveryOutcome::RetryScheduled { ready_at } = &computed.outcome
+                    && *ready_at <= now
+                {
+                    made_available.push(RetryAvailableEvent {
+                        consumer_group_id: pending.consumer_group_id.clone(),
+                        topic: pending.message_ref.topic.clone(),
+                        partition_id: pending.message_ref.partition_id,
+                        offset: pending.message_ref.offset,
+                    });
+                }
+
+                expired_outcomes.push(ExpiredDeliveryOutcome {
+                    delivery_id: delivery_id.clone(),
+                    consumer_id: pending.consumer_id.clone(),
                     topic: pending.message_ref.topic.clone(),
                     partition_id: pending.message_ref.partition_id,
                     offset: pending.message_ref.offset,
+                    consumer_group_id: pending.consumer_group_id.clone(),
+                    attempt_number: pending.attempt_number,
+                    timestamp: now,
+                    reason,
+                    outcome: computed.outcome.clone(),
                 });
+                computed_outcomes.push((delivery_id, pending, computed));
             }
 
-            expired_outcomes.push(ExpiredDeliveryOutcome {
-                delivery_id: delivery_id.clone(),
-                consumer_id: pending.consumer_id.clone(),
-                topic: pending.message_ref.topic.clone(),
-                partition_id: pending.message_ref.partition_id,
-                offset: pending.message_ref.offset,
-                consumer_group_id: pending.consumer_group_id.clone(),
-                attempt_number: pending.attempt_number,
-                timestamp: now,
-                reason,
-                outcome: computed.outcome.clone(),
-            });
-            computed_outcomes.push((delivery_id, pending, computed));
-        }
+            self.state_log
+                .append(&BrokerStateEvent::RetryMaintenanceApplied {
+                    timestamp: now,
+                    expired_outcomes,
+                    made_available: made_available.clone(),
+                })?;
 
-        self.state_log
-            .append(&BrokerStateEvent::RetryMaintenanceApplied {
-                timestamp: now,
-                expired_outcomes,
-                made_available: made_available.clone(),
-            })?;
+            for (delivery_id, pending, computed) in computed_outcomes {
+                self.apply_pending_outcome(
+                    &delivery_id,
+                    pending,
+                    &computed.outcome,
+                    computed.dead_letter,
+                )?;
+            }
 
-        for (delivery_id, pending, computed) in computed_outcomes {
-            self.apply_pending_outcome(
-                &delivery_id,
-                pending,
-                &computed.outcome,
-                computed.dead_letter,
-            )?;
-        }
+            let mut made_available_count = 0;
+            for event in &made_available {
+                if self.apply_retry_available(event, now)? {
+                    made_available_count += 1;
+                }
+            }
 
-        let mut made_available_count = 0;
-        for event in &made_available {
-            if self.apply_retry_available(event, now)? {
-                made_available_count += 1;
+            Ok(RetrySummary::new(
+                made_available.len(),
+                lease_expired,
+                made_available_count,
+                dead_lettered,
+            ))
+        })();
+
+        match &result {
+            Ok(summary) => {
+                metrics::record_broker_retry_maintenance("success");
+                metrics::record_broker_dlq_transition("expired", summary.dead_lettered());
+                info!(
+                    operation = "retry_ready",
+                    status = "success",
+                    retry_scheduled = summary.retry_scheduled(),
+                    lease_expired = summary.lease_expired(),
+                    made_available = summary.made_available(),
+                    dead_lettered = summary.dead_lettered()
+                );
+            }
+            Err(error) => {
+                metrics::record_broker_retry_maintenance("error");
+                warn!(
+                    operation = "retry_ready",
+                    status = "error",
+                    kind = durable_error_kind(error)
+                );
             }
         }
 
-        Ok(RetrySummary::new(
-            made_available.len(),
-            lease_expired,
-            made_available_count,
-            dead_lettered,
-        ))
+        result
     }
 
     /// Lists recovered and in-memory dead-letter entries matching `query`.
@@ -910,6 +1179,14 @@ impl DurableBroker {
                 let dead_letter = dead_letter.ok_or_else(|| {
                     corruption("dead-letter outcome missing dead-letter entry".to_owned())
                 })?;
+                info!(
+                    operation = "dlq_transition",
+                    topic = %dead_letter.topic(),
+                    partition = dead_letter.partition_id().value(),
+                    offset = dead_letter.offset().value(),
+                    message_id = %dead_letter.message_id(),
+                    consumer_group = %dead_letter.consumer_group_id()
+                );
                 self.state.dead_letters.push(dead_letter);
             }
         }
@@ -1340,49 +1617,94 @@ fn read_all_records(
 }
 
 fn recover_state_events(path: &Path) -> DurableBrokerResult<Vec<BrokerStateEvent>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
+    let span = info_span!("durable_broker.recover_state", operation = "recover_state");
+    let _guard = span.enter();
 
-    let mut bytes = fs::read(path)?;
-    let complete_len = if bytes.last().is_some_and(|byte| *byte == b'\n') {
-        bytes.len()
-    } else {
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |position| position + 1)
-    };
-
-    if complete_len != bytes.len() {
-        OpenOptions::new()
-            .write(true)
-            .open(path)?
-            .set_len(complete_len as u64)?;
-        bytes.truncate(complete_len);
-    }
-
-    let mut events = Vec::new();
-    for (line_index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
-        if line.is_empty() {
-            continue;
+    let result = (|| {
+        if !path.exists() {
+            return Ok(Vec::new());
         }
 
-        let event =
-            serde_json::from_slice(line).map_err(|error| DurableBrokerError::StateCorruption {
-                path: path.to_path_buf(),
-                line: line_index + 1,
-                reason: error.to_string(),
+        let mut bytes = fs::read(path)?;
+        let complete_len = if bytes.last().is_some_and(|byte| *byte == b'\n') {
+            bytes.len()
+        } else {
+            bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |position| position + 1)
+        };
+
+        if complete_len != bytes.len() {
+            OpenOptions::new()
+                .write(true)
+                .open(path)?
+                .set_len(complete_len as u64)?;
+            bytes.truncate(complete_len);
+        }
+
+        let mut events = Vec::new();
+        for (line_index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+
+            let event = serde_json::from_slice(line).map_err(|error| {
+                DurableBrokerError::StateCorruption {
+                    path: path.to_path_buf(),
+                    line: line_index + 1,
+                    reason: error.to_string(),
+                }
             })?;
-        events.push(event);
+            events.push(event);
+        }
+
+        Ok(events)
+    })();
+
+    match &result {
+        Ok(events) => {
+            metrics::record_broker_recovery("success");
+            info!(
+                operation = "recover_state",
+                status = "success",
+                recovered_events = events.len()
+            );
+        }
+        Err(error) => {
+            metrics::record_broker_recovery("error");
+            warn!(
+                operation = "recover_state",
+                status = "error",
+                kind = durable_error_kind(error)
+            );
+        }
     }
 
-    Ok(events)
+    result
 }
 
 fn corruption(reason: impl Into<String>) -> DurableBrokerError {
     DurableBrokerError::Corruption {
         reason: reason.into(),
+    }
+}
+
+fn durable_error_kind(error: &DurableBrokerError) -> &'static str {
+    match error {
+        DurableBrokerError::Broker(BrokerError::Domain(_)) => "domain",
+        DurableBrokerError::Broker(BrokerError::TopicAlreadyExists { .. }) => {
+            "topic_already_exists"
+        }
+        DurableBrokerError::Broker(BrokerError::TopicNotFound { .. }) => "topic_not_found",
+        DurableBrokerError::Broker(BrokerError::DeliveryNotFound { .. }) => "delivery_not_found",
+        DurableBrokerError::Broker(BrokerError::InvalidConsumer { .. }) => "invalid_consumer",
+        DurableBrokerError::Broker(BrokerError::InvalidConfig { .. }) => "invalid_config",
+        DurableBrokerError::Storage(_) => "storage",
+        DurableBrokerError::Io(_) => "io",
+        DurableBrokerError::Serde(_) => "serde",
+        DurableBrokerError::StateCorruption { .. } => "state_corruption",
+        DurableBrokerError::Corruption { .. } => "corruption",
     }
 }
 

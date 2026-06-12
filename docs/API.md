@@ -2,7 +2,8 @@
 
 Milestone 5 exposes a local HTTP control plane backed by `DurableBroker`.
 Milestone 7 uses this API from the TypeScript `ferrumq` CLI for control-plane
-commands only.
+commands only. Milestone 9 adds `GET /metrics` as an operational Prometheus
+text endpoint for process-local counters.
 
 Start the server:
 
@@ -12,7 +13,7 @@ cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 1
 
 This API is control-plane only. It manages and inspects local durable broker state. It does not provide HTTP publish, consume, ACK, or NACK endpoints. The TypeScript CLI uses unary gRPC for those data-plane commands. TypeScript TUI behavior, auth, TLS, rate limiting, observability export, clustering, replication, and exactly-once semantics are intentionally deferred.
 
-All JSON responses, including API-owned error responses, use `application/json`. Endpoints with JSON request bodies require `Content-Type: application/json`.
+All JSON responses, including API-owned error responses, use `application/json`. Endpoints with JSON request bodies require `Content-Type: application/json`. `GET /metrics` is the exception: it returns Prometheus text, not JSON.
 
 ## Error Envelope
 
@@ -66,6 +67,29 @@ Response `200 OK`:
 ```json
 { "status": "ok" }
 ```
+
+## Metrics
+
+### `GET /metrics`
+
+Returns process-local Prometheus text exposition for counters recorded in this
+HTTP control-plane process.
+
+Response `200 OK` content type:
+
+```txt
+text/plain; version=0.0.4; charset=utf-8
+```
+
+The output includes `# HELP` and `# TYPE` lines for known FerrumQ counters and
+sample lines for counters observed in the current process. Metric labels are
+limited to `method`, `route`, `status`, `code`, and `kind`. Metrics do not
+include topic names, message payloads, message IDs, delivery IDs, consumer IDs,
+full filesystem paths, backtraces, or debug dumps.
+
+When HTTP and gRPC are run as separate `brokerd` processes, this endpoint
+reports only the HTTP process. Cross-process aggregation, dashboards,
+OpenTelemetry export, auth, TLS, and rate limiting for metrics are deferred.
 
 ## Readiness
 

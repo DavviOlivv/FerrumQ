@@ -3,8 +3,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use msg_core::{MessageEnvelope, Offset, PartitionId, TopicName};
+use msg_observability::metrics;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{info, info_span, warn};
 
 const FORMAT_VERSION: u8 = 1;
 const FRAME_HEADER_BYTES: u64 = 8;
@@ -131,21 +133,57 @@ impl PartitionLog {
         topic: &TopicName,
         partition: PartitionId,
     ) -> StorageResult<Self> {
-        validate_config(&config)?;
+        let span = info_span!(
+            "storage.partition_log.open",
+            operation = "partition_log_open",
+            topic = %topic,
+            partition = partition.value()
+        );
+        let _guard = span.enter();
 
-        let partition_dir = partition_dir(&config.root_dir, topic, partition);
-        fs::create_dir_all(&partition_dir)?;
+        let result = (|| {
+            validate_config(&config)?;
 
-        let mut log = Self {
-            config,
-            topic: topic.clone(),
-            partition,
-            partition_dir,
-            segments: Vec::new(),
-            next_offset: Offset::new(0),
-        };
-        log.recover()?;
-        Ok(log)
+            let partition_dir = partition_dir(&config.root_dir, topic, partition);
+            fs::create_dir_all(&partition_dir)?;
+
+            let mut log = Self {
+                config,
+                topic: topic.clone(),
+                partition,
+                partition_dir,
+                segments: Vec::new(),
+                next_offset: Offset::new(0),
+            };
+            log.recover()?;
+            Ok(log)
+        })();
+
+        match &result {
+            Ok(log) => {
+                metrics::record_storage_partition_log_open("success");
+                info!(
+                    operation = "partition_log_open",
+                    status = "success",
+                    topic = %topic,
+                    partition = partition.value(),
+                    next_offset = log.next_offset().value()
+                );
+            }
+            Err(error) => {
+                metrics::record_storage_partition_log_open("error");
+                metrics::record_storage_error(storage_error_kind(error));
+                warn!(
+                    operation = "partition_log_open",
+                    status = "error",
+                    topic = %topic,
+                    partition = partition.value(),
+                    kind = storage_error_kind(error)
+                );
+            }
+        }
+
+        result
     }
 
     /// Appends one envelope and returns its assigned partition offset.
@@ -157,41 +195,81 @@ impl PartitionLog {
     /// truncation. The current write path calls [`Write::flush`]; explicit fsync
     /// policy tuning is deferred.
     pub fn append(&mut self, envelope: MessageEnvelope) -> StorageResult<Offset> {
-        let offset = self.next_offset;
-        let next_offset = increment_offset(offset, &self.partition_dir)?;
-        let persisted = PersistedRecord {
-            format_version: FORMAT_VERSION,
-            topic: self.topic.clone(),
-            partition: self.partition,
-            offset,
-            envelope,
-        };
-        let payload = serde_json::to_vec(&persisted)?;
-        let frame = encode_frame(&payload, &self.partition_dir)?;
-        let frame_size = u64::try_from(frame.len()).map_err(|_| StorageError::InvalidFormat {
-            path: self.partition_dir.clone(),
-            reason: "frame length does not fit in u64".to_owned(),
-        })?;
+        let message_id = envelope.id().clone();
+        let span = info_span!(
+            "storage.partition_log.append",
+            operation = "append",
+            topic = %self.topic,
+            partition = self.partition.value(),
+            message_id = %message_id
+        );
+        let _guard = span.enter();
 
-        self.roll_if_needed(frame_size)?;
-        let segment_index = self.ensure_active_segment()?;
-        let segment_path = self.segments[segment_index].path.clone();
-        let rollback_len = self.segments[segment_index].size_bytes;
-        let new_segment_size =
-            rollback_len
-                .checked_add(frame_size)
-                .ok_or_else(|| StorageError::InvalidFormat {
+        let result = (|| {
+            let offset = self.next_offset;
+            let next_offset = increment_offset(offset, &self.partition_dir)?;
+            let persisted = PersistedRecord {
+                format_version: FORMAT_VERSION,
+                topic: self.topic.clone(),
+                partition: self.partition,
+                offset,
+                envelope,
+            };
+            let payload = serde_json::to_vec(&persisted)?;
+            let frame = encode_frame(&payload, &self.partition_dir)?;
+            let frame_size =
+                u64::try_from(frame.len()).map_err(|_| StorageError::InvalidFormat {
+                    path: self.partition_dir.clone(),
+                    reason: "frame length does not fit in u64".to_owned(),
+                })?;
+
+            self.roll_if_needed(frame_size)?;
+            let segment_index = self.ensure_active_segment()?;
+            let segment_path = self.segments[segment_index].path.clone();
+            let rollback_len = self.segments[segment_index].size_bytes;
+            let new_segment_size = rollback_len.checked_add(frame_size).ok_or_else(|| {
+                StorageError::InvalidFormat {
                     path: segment_path.clone(),
                     reason: "segment size overflow".to_owned(),
-                })?;
-        append_frame_with_rollback(&segment_path, &frame, rollback_len)?;
+                }
+            })?;
+            append_frame_with_rollback(&segment_path, &frame, rollback_len)?;
 
-        let segment = &mut self.segments[segment_index];
-        segment.size_bytes = new_segment_size;
-        segment.next_offset = next_offset;
-        self.next_offset = next_offset;
+            let segment = &mut self.segments[segment_index];
+            segment.size_bytes = new_segment_size;
+            segment.next_offset = next_offset;
+            self.next_offset = next_offset;
 
-        Ok(offset)
+            Ok(offset)
+        })();
+
+        match &result {
+            Ok(offset) => {
+                metrics::record_storage_append("success");
+                info!(
+                    operation = "append",
+                    status = "success",
+                    topic = %self.topic,
+                    partition = self.partition.value(),
+                    offset = offset.value(),
+                    message_id = %message_id
+                );
+            }
+            Err(error) => {
+                metrics::record_storage_append("error");
+                metrics::record_storage_error(storage_error_kind(error));
+                warn!(
+                    operation = "append",
+                    status = "error",
+                    topic = %self.topic,
+                    partition = self.partition.value(),
+                    message_id = %message_id,
+                    kind = storage_error_kind(error)
+                );
+            }
+        }
+
+        result
     }
 
     /// Reads up to `limit` records starting at `offset`.
@@ -245,54 +323,90 @@ impl PartitionLog {
     }
 
     fn recover(&mut self) -> StorageResult<()> {
-        let segment_files = discover_segment_files(&self.partition_dir)?;
-        let mut expected_offset = Offset::new(0);
-        let final_index = segment_files.len().checked_sub(1);
+        let span = info_span!(
+            "storage.partition_log.recover",
+            operation = "recover",
+            topic = %self.topic,
+            partition = self.partition.value()
+        );
+        let _guard = span.enter();
 
-        for (index, segment_file) in segment_files.into_iter().enumerate() {
-            if segment_file.base_offset != expected_offset {
-                return Err(StorageError::CorruptSegment {
+        let result = (|| {
+            let segment_files = discover_segment_files(&self.partition_dir)?;
+            let mut expected_offset = Offset::new(0);
+            let final_index = segment_files.len().checked_sub(1);
+
+            for (index, segment_file) in segment_files.into_iter().enumerate() {
+                if segment_file.base_offset != expected_offset {
+                    return Err(StorageError::CorruptSegment {
+                        path: segment_file.path,
+                        reason: format!(
+                            "segment base offset {} does not match expected offset {}",
+                            segment_file.base_offset.value(),
+                            expected_offset.value()
+                        ),
+                    });
+                }
+
+                let is_final = Some(index) == final_index;
+                let mode = if is_final {
+                    ScanMode::RECOVER_FINAL
+                } else {
+                    ScanMode::STRICT
+                };
+                let scan = scan_segment(
+                    &segment_file.path,
+                    &self.topic,
+                    self.partition,
+                    expected_offset,
+                    mode,
+                )?;
+
+                if scan.size_bytes == 0 && !is_final {
+                    return Err(StorageError::CorruptSegment {
+                        path: segment_file.path,
+                        reason: "empty non-final segment".to_owned(),
+                    });
+                }
+
+                self.segments.push(SegmentMetadata {
+                    base_offset: segment_file.base_offset,
+                    next_offset: scan.next_offset,
                     path: segment_file.path,
-                    reason: format!(
-                        "segment base offset {} does not match expected offset {}",
-                        segment_file.base_offset.value(),
-                        expected_offset.value()
-                    ),
+                    size_bytes: scan.size_bytes,
                 });
+                expected_offset = scan.next_offset;
             }
 
-            let is_final = Some(index) == final_index;
-            let mode = if is_final {
-                ScanMode::RECOVER_FINAL
-            } else {
-                ScanMode::STRICT
-            };
-            let scan = scan_segment(
-                &segment_file.path,
-                &self.topic,
-                self.partition,
-                expected_offset,
-                mode,
-            )?;
+            self.next_offset = expected_offset;
+            Ok(())
+        })();
 
-            if scan.size_bytes == 0 && !is_final {
-                return Err(StorageError::CorruptSegment {
-                    path: segment_file.path,
-                    reason: "empty non-final segment".to_owned(),
-                });
+        match &result {
+            Ok(()) => {
+                metrics::record_storage_partition_log_recovery("success");
+                info!(
+                    operation = "recover",
+                    status = "success",
+                    topic = %self.topic,
+                    partition = self.partition.value(),
+                    segments = self.segments.len(),
+                    next_offset = self.next_offset.value()
+                );
             }
-
-            self.segments.push(SegmentMetadata {
-                base_offset: segment_file.base_offset,
-                next_offset: scan.next_offset,
-                path: segment_file.path,
-                size_bytes: scan.size_bytes,
-            });
-            expected_offset = scan.next_offset;
+            Err(error) => {
+                metrics::record_storage_partition_log_recovery("error");
+                warn!(
+                    operation = "recover",
+                    status = "error",
+                    topic = %self.topic,
+                    partition = self.partition.value(),
+                    kind = storage_error_kind(error)
+                );
+            }
         }
 
-        self.next_offset = expected_offset;
-        Ok(())
+        result
     }
 
     fn roll_if_needed(&mut self, frame_size: u64) -> StorageResult<()> {
@@ -588,6 +702,13 @@ fn repair_or_reject_trailing(
 ) -> StorageResult<SegmentScan> {
     if mode.repair_final_trailing_record {
         file.set_len(frame_start)?;
+        metrics::record_storage_trailing_repair(trailing_repair_kind(reason));
+        info!(
+            operation = "trailing_repair",
+            status = "success",
+            kind = trailing_repair_kind(reason),
+            offset = expected_offset.value()
+        );
         return Ok(SegmentScan {
             records,
             next_offset: expected_offset,
@@ -667,6 +788,31 @@ fn increment_offset(offset: Offset, path: &Path) -> StorageResult<Offset> {
             reason: "offset overflow".to_owned(),
         })?;
     Ok(Offset::new(next))
+}
+
+fn storage_error_kind(error: &StorageError) -> &'static str {
+    match error {
+        StorageError::Io(_) => "io",
+        StorageError::InvalidConfig { .. } => "invalid_config",
+        StorageError::InvalidFormat { .. } => "invalid_format",
+        StorageError::ChecksumMismatch { .. } => "checksum_mismatch",
+        StorageError::CorruptSegment { .. } => "corrupt_segment",
+        StorageError::Serde(_) => "serde",
+    }
+}
+
+fn trailing_repair_kind(reason: &str) -> &'static str {
+    if reason.contains("checksum") {
+        "checksum_mismatch"
+    } else if reason.contains("JSON") {
+        "invalid_json"
+    } else if reason.contains("metadata") {
+        "invalid_metadata"
+    } else if reason.contains("length") {
+        "truncated_length"
+    } else {
+        "truncated_payload"
+    }
 }
 
 /// Returns this crate's package name.

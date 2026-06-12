@@ -98,6 +98,10 @@ On startup and refresh, the TUI concurrently fetches:
 - `GET /v1/topics`.
 - `GET /v1/dlq`.
 
+`GET /metrics` exists on the HTTP control plane as an operational Prometheus
+endpoint, but the TUI does not fetch it or render charts/live metric panels in
+Milestone 9.
+
 Expected failures render as short messages without stack traces. The shared
 HTTP client distinguishes network failures, FerrumQ non-2xx error envelopes,
 malformed non-2xx responses, invalid JSON, and schema validation failures.
@@ -111,7 +115,8 @@ keeps the last successful snapshot visible, including stale Topics and DLQ rows.
 ## Limitations
 
 The TUI is read-only in Milestone 8. It does not publish, consume, ACK, NACK,
-retry messages, inspect lag, stream logs, call the gRPC data plane, start or
-supervise broker processes, or implement broker semantics. Public SDK workflows,
-auth/RBAC, TLS, rate limiting, observability dashboards/export, clustering,
-replication, exactly-once semantics, and MaaS/multi-tenancy remain deferred.
+retry messages, inspect lag, stream logs, fetch `/metrics`, call the gRPC data
+plane, start or supervise broker processes, or implement broker semantics.
+Public SDK workflows, auth/RBAC, TLS, rate limiting, observability
+dashboards/export, clustering, replication, exactly-once semantics, and
+MaaS/multi-tenancy remain deferred.

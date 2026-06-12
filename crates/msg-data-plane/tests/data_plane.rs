@@ -1,6 +1,7 @@
 use msg_broker::{BrokerConfig, CreateTopicCommand, DlqQuery, DurableBroker, DurableBrokerConfig};
 use msg_core::{DeadLetterReason, RetryPolicy, TopicConfig, TopicName};
 use msg_data_plane::DataPlaneService;
+use msg_observability::{metric_names, metrics};
 use msg_protocol::ferrumq::dataplane::v1::{
     AckRequest, ConsumeRequest, ConsumedMessage, NackRequest, PublishRequest, PublishResponse,
     ferrum_q_data_plane_server::FerrumQDataPlane,
@@ -156,6 +157,143 @@ fn assert_invalid_contains<T: std::fmt::Debug>(
         "expected {:?} to contain {:?}",
         error.message(),
         expected_message
+    );
+}
+
+#[tokio::test]
+async fn successful_rpc_flow_updates_data_broker_and_storage_metrics() {
+    let (_root, service) = service_with_topic(3, None);
+    let publish_before =
+        metrics::counter_value(metric_names::DATA_PUBLISHES_TOTAL, &[("status", "success")]);
+    let storage_append_before = metrics::counter_value(
+        metric_names::STORAGE_APPENDS_TOTAL,
+        &[("status", "success")],
+    );
+    let consume_before =
+        metrics::counter_value(metric_names::DATA_CONSUMES_TOTAL, &[("status", "success")]);
+    let delivered_before = metrics::counter_value(metric_names::DATA_MESSAGES_DELIVERED_TOTAL, &[]);
+    let broker_delivered_before =
+        metrics::counter_value(metric_names::BROKER_DELIVERIES_CREATED_TOTAL, &[]);
+    let ack_before =
+        metrics::counter_value(metric_names::DATA_ACKS_TOTAL, &[("status", "success")]);
+    let nack_before =
+        metrics::counter_value(metric_names::DATA_NACKS_TOTAL, &[("status", "success")]);
+
+    publish(&service, "message-1").await;
+    let consumed = consume_messages(&service, consume_request(10)).await;
+    service
+        .ack(Request::new(ack_request(
+            consumed[0].delivery_id.clone(),
+            "consumer-1",
+        )))
+        .await
+        .unwrap();
+
+    publish(&service, "message-2").await;
+    let consumed = consume_messages(&service, consume_request(20)).await;
+    service
+        .nack(Request::new(nack_request(
+            consumed[0].delivery_id.clone(),
+            "consumer-1",
+            "transient",
+        )))
+        .await
+        .unwrap();
+
+    assert!(
+        metrics::counter_value(metric_names::DATA_PUBLISHES_TOTAL, &[("status", "success")])
+            >= publish_before + 2
+    );
+    assert!(
+        metrics::counter_value(
+            metric_names::STORAGE_APPENDS_TOTAL,
+            &[("status", "success")]
+        ) >= storage_append_before + 2
+    );
+    assert!(
+        metrics::counter_value(metric_names::DATA_CONSUMES_TOTAL, &[("status", "success")])
+            >= consume_before + 2
+    );
+    assert!(
+        metrics::counter_value(metric_names::DATA_MESSAGES_DELIVERED_TOTAL, &[])
+            >= delivered_before + 2
+    );
+    assert!(
+        metrics::counter_value(metric_names::BROKER_DELIVERIES_CREATED_TOTAL, &[])
+            >= broker_delivered_before + 2
+    );
+    assert!(
+        metrics::counter_value(metric_names::DATA_ACKS_TOTAL, &[("status", "success")])
+            > ack_before
+    );
+    assert!(
+        metrics::counter_value(metric_names::DATA_NACKS_TOTAL, &[("status", "success")])
+            > nack_before
+    );
+}
+
+#[tokio::test]
+async fn rpc_errors_update_sanitized_error_metrics() {
+    let (_root, service) = service_with_topic(3, Some(1_000));
+    let invalid_publish_before = metrics::counter_value(
+        metric_names::DATA_RPC_ERRORS_TOTAL,
+        &[("method", "Publish"), ("code", "invalid_argument")],
+    );
+    let missing_consume_before = metrics::counter_value(
+        metric_names::DATA_RPC_ERRORS_TOTAL,
+        &[("method", "Consume"), ("code", "not_found")],
+    );
+    let failed_ack_before = metrics::counter_value(
+        metric_names::DATA_RPC_ERRORS_TOTAL,
+        &[("method", "Ack"), ("code", "failed_precondition")],
+    );
+
+    let mut invalid_publish = publish_request("message-1");
+    invalid_publish.topic.clear();
+    assert_status(
+        service.publish(Request::new(invalid_publish)).await,
+        Code::InvalidArgument,
+        "topic_name must not be empty",
+    );
+
+    let mut missing_consume = consume_request(10);
+    missing_consume.topic = "payments".to_owned();
+    assert_status(
+        service.consume(Request::new(missing_consume)).await,
+        Code::NotFound,
+        "topic not found",
+    );
+
+    publish(&service, "message-2").await;
+    let consumed = consume_messages(&service, consume_request(20)).await;
+    assert_status(
+        service
+            .ack(Request::new(ack_request(
+                consumed[0].delivery_id.clone(),
+                "consumer-2",
+            )))
+            .await,
+        Code::FailedPrecondition,
+        "invalid delivery ownership",
+    );
+
+    assert!(
+        metrics::counter_value(
+            metric_names::DATA_RPC_ERRORS_TOTAL,
+            &[("method", "Publish"), ("code", "invalid_argument")]
+        ) > invalid_publish_before
+    );
+    assert!(
+        metrics::counter_value(
+            metric_names::DATA_RPC_ERRORS_TOTAL,
+            &[("method", "Consume"), ("code", "not_found")]
+        ) > missing_consume_before
+    );
+    assert!(
+        metrics::counter_value(
+            metric_names::DATA_RPC_ERRORS_TOTAL,
+            &[("method", "Ack"), ("code", "failed_precondition")]
+        ) > failed_ack_before
     );
 }
 
@@ -589,6 +727,10 @@ async fn nack_unknown_delivery_and_retry_persistence_across_reopen() {
 #[tokio::test]
 async fn dlq_durability_reason_preservation_and_no_redelivery() {
     let root = TempDir::new().unwrap();
+    let dlq_before = metrics::counter_value(
+        metric_names::BROKER_DLQ_TRANSITIONS_TOTAL,
+        &[("kind", "nack")],
+    );
     let mut broker = open_broker(&root, 2, None);
     create_topic(&mut broker);
     let service = DataPlaneService::new(broker);
@@ -627,6 +769,12 @@ async fn dlq_durability_reason_preservation_and_no_redelivery() {
 
     let empty = consume_messages(&reopened, consume_request(FAR_FUTURE_MS + 100)).await;
     assert!(empty.is_empty());
+    assert!(
+        metrics::counter_value(
+            metric_names::BROKER_DLQ_TRANSITIONS_TOTAL,
+            &[("kind", "nack")]
+        ) > dlq_before
+    );
 }
 
 #[tokio::test]

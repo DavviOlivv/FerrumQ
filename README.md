@@ -18,6 +18,8 @@ Milestone 7 adds the first usable TypeScript CLI. The binary is `ferrumq`, with 
 
 Milestone 8 adds the first usable TypeScript TUI. The binary is `ferrumq-tui`, implemented with Ink as a read-only dashboard over the HTTP control plane. It shows health, readiness, broker status, topic summaries, DLQ entries, the configured control URL, and the configured gRPC URL; it does not publish, consume, ACK, NACK, supervise broker processes, or implement broker semantics. TUI usage, key bindings, limits, and expected error behavior are documented in [docs/TUI.md](docs/TUI.md).
 
+Milestone 9 adds a focused observability foundation. `brokerd` initializes structured `tracing` logs from `RUST_LOG` and optional `FERRUMQ_LOG_FORMAT=compact|json`; HTTP, gRPC, durable broker, and storage paths record process-local counters through `msg-observability`; and the HTTP control plane exposes Prometheus text at `GET /metrics`. Metrics are local operational data, not dashboards, collectors, remote telemetry, auth, TLS, or TypeScript observability panels. Behavior and metric names are documented in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+
 Start the local control-plane server:
 
 ```sh
@@ -28,6 +30,12 @@ Start the local data-plane gRPC server:
 
 ```sh
 cargo run -p msg-runtime --bin brokerd -- serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090
+```
+
+Inspect local process metrics from the HTTP control plane:
+
+```sh
+curl http://127.0.0.1:8080/metrics
 ```
 
 ## Architecture Direction
@@ -57,6 +65,8 @@ cargo test --workspace
 cargo nextest run --workspace
 cargo deny check
 pnpm install --frozen-lockfile
+pnpm format:check
+pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build

@@ -62,6 +62,15 @@ The service is unary-only:
 
 `AckRequest` carries required `delivery_id` and `consumer_id` strings. `NackRequest` carries required `delivery_id` and `consumer_id` strings plus optional `reason`; empty or whitespace-only reasons use the broker default.
 
+## Observability Boundary
+
+Milestone 9 does not change protobuf messages or service methods. The
+`msg-data-plane` adapter records local structured spans and process-local
+counters for `Publish`, `Consume`, `Ack`, and `Nack`. Metrics use sanitized gRPC
+code strings such as `ok`, `invalid_argument`, `not_found`, and
+`failed_precondition`; message payloads, topics, message IDs, delivery IDs, and
+consumer IDs are not metric labels.
+
 ## Versioning Strategy
 
 Protocol versions should be explicit in API paths, protobuf packages, or schema metadata. Breaking changes require a new version. Compatible additions should prefer optional fields with documented defaults. The Milestone 6 protobuf package version is `ferrumq.dataplane.v1`.

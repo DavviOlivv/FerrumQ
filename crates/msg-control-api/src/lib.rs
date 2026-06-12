@@ -6,7 +6,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -15,9 +15,11 @@ use msg_broker::{
     DurableBrokerError,
 };
 use msg_core::{DeadLetterReason, DomainError, Topic, TopicConfig, TopicName};
+use msg_observability::{PROMETHEUS_CONTENT_TYPE, metrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tracing::{info, warn};
 
 const DEFAULT_MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -79,6 +81,7 @@ pub fn open_state(config: ControlApiConfig) -> Result<AppState, ControlApiError>
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics_endpoint))
         .route("/ready", get(ready))
         .route("/v1/status", get(status))
         .route("/v1/topics", post(create_topic).get(list_topics))
@@ -89,12 +92,25 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+#[tracing::instrument(name = "control_api.health", skip_all)]
 async fn health() -> Json<StatusResponse> {
+    record_http_success("GET", "/health", StatusCode::OK, "health");
     Json(StatusResponse { status: "ok" })
 }
 
+#[tracing::instrument(name = "control_api.metrics", skip_all)]
+async fn metrics_endpoint() -> Response {
+    record_http_success("GET", "/metrics", StatusCode::OK, "metrics");
+    (
+        [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+        metrics::render_prometheus(),
+    )
+        .into_response()
+}
+
+#[tracing::instrument(name = "control_api.ready", skip_all)]
 async fn ready(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
-    with_broker(&state, |broker| {
+    let result = with_broker(&state, |broker| {
         let _status = broker.status();
         Ok(Json(StatusResponse { status: "ready" }))
     })
@@ -103,11 +119,13 @@ async fn ready(State(state): State<AppState>) -> Result<Json<StatusResponse>, Ap
             ApiError::broker_unavailable("durable broker state is not accessible")
         }
         other => other,
-    })
+    });
+    observe_http_result("GET", "/ready", StatusCode::OK, "ready", result)
 }
 
+#[tracing::instrument(name = "control_api.status", skip_all)]
 async fn status(State(state): State<AppState>) -> Result<Json<BrokerStatusResponse>, ApiError> {
-    with_broker(&state, |broker| {
+    let result = with_broker(&state, |broker| {
         let status = broker.status();
         Ok(Json(BrokerStatusResponse {
             mode: status.mode(),
@@ -115,18 +133,35 @@ async fn status(State(state): State<AppState>) -> Result<Json<BrokerStatusRespon
             topics: status.topic_count(),
             dlq_entries: status.dlq_count(),
         }))
-    })
+    });
+    observe_http_result("GET", "/v1/status", StatusCode::OK, "status", result)
 }
 
+#[tracing::instrument(name = "control_api.create_topic", skip_all)]
 async fn create_topic(
     State(state): State<AppState>,
+    request: Result<Json<CreateTopicRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<TopicResponse>), ApiError> {
+    let result = create_topic_inner(&state, request);
+    metrics::record_control_topic_create(if result.is_ok() { "success" } else { "error" });
+    observe_http_result(
+        "POST",
+        "/v1/topics",
+        StatusCode::CREATED,
+        "create_topic",
+        result,
+    )
+}
+
+fn create_topic_inner(
+    state: &AppState,
     request: Result<Json<CreateTopicRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<TopicResponse>), ApiError> {
     let request = request.map_err(ApiError::from_json_rejection)?.0;
     let topic_name = parse_topic_name(&request.name)?;
     let topic_config = TopicConfig::new(request.partitions).map_err(ApiError::from_domain)?;
 
-    with_broker(&state, |broker| {
+    with_broker(state, |broker| {
         broker
             .create_topic(CreateTopicCommand::new(topic_name, topic_config))
             .map(topic_response)
@@ -135,8 +170,9 @@ async fn create_topic(
     })
 }
 
+#[tracing::instrument(name = "control_api.list_topics", skip_all)]
 async fn list_topics(State(state): State<AppState>) -> Result<Json<TopicListResponse>, ApiError> {
-    with_broker(&state, |broker| {
+    let result = with_broker(&state, |broker| {
         Ok(Json(TopicListResponse {
             items: broker
                 .list_topics()
@@ -144,16 +180,29 @@ async fn list_topics(State(state): State<AppState>) -> Result<Json<TopicListResp
                 .map(topic_response)
                 .collect(),
         }))
-    })
+    });
+    observe_http_result("GET", "/v1/topics", StatusCode::OK, "list_topics", result)
 }
 
+#[tracing::instrument(name = "control_api.get_topic", skip_all)]
 async fn get_topic(
     State(state): State<AppState>,
     Path(topic_name): Path<String>,
 ) -> Result<Json<TopicResponse>, ApiError> {
-    let topic_name = parse_topic_name(&topic_name)?;
+    let result = get_topic_inner(&state, &topic_name);
+    observe_http_result(
+        "GET",
+        "/v1/topics/{topicName}",
+        StatusCode::OK,
+        "get_topic",
+        result,
+    )
+}
 
-    with_broker(&state, |broker| {
+fn get_topic_inner(state: &AppState, topic_name: &str) -> Result<Json<TopicResponse>, ApiError> {
+    let topic_name = parse_topic_name(topic_name)?;
+
+    with_broker(state, |broker| {
         broker
             .get_topic(&topic_name)
             .map(topic_response)
@@ -162,16 +211,22 @@ async fn get_topic(
     })
 }
 
+#[tracing::instrument(name = "control_api.list_dlq", skip_all)]
 async fn list_dlq(
     State(state): State<AppState>,
     Query(query): Query<DlqRequest>,
 ) -> Result<Json<DlqListResponse>, ApiError> {
+    let result = list_dlq_inner(&state, query);
+    observe_http_result("GET", "/v1/dlq", StatusCode::OK, "list_dlq", result)
+}
+
+fn list_dlq_inner(state: &AppState, query: DlqRequest) -> Result<Json<DlqListResponse>, ApiError> {
     let query = match query.topic {
         Some(topic) => DlqQuery::for_topic(parse_topic_name(&topic)?),
         None => DlqQuery::all(),
     };
 
-    with_broker(&state, |broker| {
+    with_broker(state, |broker| {
         broker
             .list_dlq(query)
             .map(|entries| DlqListResponse {
@@ -192,6 +247,48 @@ async fn list_dlq(
             .map(Json)
             .map_err(ApiError::from_durable)
     })
+}
+
+fn observe_http_result<T>(
+    method: &'static str,
+    route: &'static str,
+    success_status: StatusCode,
+    operation: &'static str,
+    result: Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    match &result {
+        Ok(_) => record_http_success(method, route, success_status, operation),
+        Err(error) => record_http_error(method, route, operation, error),
+    }
+    result
+}
+
+fn record_http_success(
+    method: &'static str,
+    route: &'static str,
+    status: StatusCode,
+    operation: &'static str,
+) {
+    metrics::record_control_http_request(method, route, status.as_u16());
+    info!(operation, method, route, status = status.as_u16());
+}
+
+fn record_http_error(
+    method: &'static str,
+    route: &'static str,
+    operation: &'static str,
+    error: &ApiError,
+) {
+    let status = error.status_code();
+    metrics::record_control_http_request(method, route, status.as_u16());
+    metrics::record_control_http_error(method, route, status.as_u16(), error.code());
+    warn!(
+        operation,
+        method,
+        route,
+        status = status.as_u16(),
+        code = error.code()
+    );
 }
 
 fn with_broker<T>(
@@ -227,11 +324,20 @@ fn dead_letter_reason(reason: &DeadLetterReason) -> String {
 }
 
 async fn not_found() -> ApiError {
-    ApiError::RouteNotFound("route not found".to_owned())
+    let error = ApiError::RouteNotFound("route not found".to_owned());
+    record_http_error("UNKNOWN", "unmatched", "not_found", &error);
+    error
 }
 
 async fn method_not_allowed() -> ApiError {
-    ApiError::MethodNotAllowed("method not allowed".to_owned())
+    let error = ApiError::MethodNotAllowed("method not allowed".to_owned());
+    record_http_error(
+        "UNKNOWN",
+        "method_not_allowed",
+        "method_not_allowed",
+        &error,
+    );
+    error
 }
 
 #[derive(Debug, Clone, Serialize)]
