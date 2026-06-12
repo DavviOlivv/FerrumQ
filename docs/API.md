@@ -87,6 +87,9 @@ limited to `method`, `route`, `status`, `code`, and `kind`. Metrics do not
 include topic names, message payloads, message IDs, delivery IDs, consumer IDs,
 full filesystem paths, backtraces, or debug dumps.
 
+Each successful scrape is counted once before rendering as
+`ferrumq_control_http_requests_total{method="GET",route="/metrics",status="200"}`.
+
 When HTTP and gRPC are run as separate `brokerd` processes, this endpoint
 reports only the HTTP process. Cross-process aggregation, dashboards,
 OpenTelemetry export, auth, TLS, and rate limiting for metrics are deferred.

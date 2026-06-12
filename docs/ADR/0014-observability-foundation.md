@@ -20,7 +20,8 @@ observability infrastructure.
 Use Rust `tracing` for structured spans and events across runtime startup,
 HTTP handlers, gRPC handlers, durable broker operations, and storage recovery.
 `brokerd` initializes tracing from `RUST_LOG`; `FERRUMQ_LOG_FORMAT=json` selects
-JSON logs and the default is compact text.
+JSON logs, `compact` selects compact text, and the unset default is compact
+text. Other values fail startup for commands that initialize tracing.
 
 Add a small internal metrics registry in `msg-observability`. The registry owns
 process-local counters and renders Prometheus text directly. It avoids global
@@ -32,6 +33,9 @@ Expose metrics through the HTTP control plane at `GET /metrics` with:
 ```txt
 text/plain; version=0.0.4; charset=utf-8
 ```
+
+Each successful scrape is recorded once as a normal HTTP request before
+rendering the response. Repeated scrapes mutate only that scrape counter.
 
 Metrics use low-cardinality labels only: `method`, `route`, `status`, `code`,
 and `kind`. Topic names, message IDs, delivery IDs, consumer IDs, payloads,

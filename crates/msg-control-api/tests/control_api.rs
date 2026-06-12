@@ -14,8 +14,51 @@ use msg_core::{
 };
 use msg_observability::{PROMETHEUS_CONTENT_TYPE, metric_names, metrics};
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+const ALL_METRIC_NAMES: &[&str] = &[
+    metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+    metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+    metric_names::CONTROL_TOPICS_CREATED_TOTAL,
+    metric_names::DATA_RPC_REQUESTS_TOTAL,
+    metric_names::DATA_RPC_ERRORS_TOTAL,
+    metric_names::DATA_PUBLISHES_TOTAL,
+    metric_names::DATA_CONSUMES_TOTAL,
+    metric_names::DATA_MESSAGES_DELIVERED_TOTAL,
+    metric_names::DATA_ACKS_TOTAL,
+    metric_names::DATA_NACKS_TOTAL,
+    metric_names::BROKER_OPENS_TOTAL,
+    metric_names::BROKER_RECOVERIES_TOTAL,
+    metric_names::BROKER_TOPICS_CREATED_TOTAL,
+    metric_names::BROKER_MESSAGES_PUBLISHED_TOTAL,
+    metric_names::BROKER_CONSUMES_TOTAL,
+    metric_names::BROKER_DELIVERIES_CREATED_TOTAL,
+    metric_names::BROKER_ACKS_TOTAL,
+    metric_names::BROKER_NACKS_TOTAL,
+    metric_names::BROKER_RETRY_MAINTENANCE_TOTAL,
+    metric_names::BROKER_DLQ_TRANSITIONS_TOTAL,
+    metric_names::STORAGE_PARTITION_LOG_OPENS_TOTAL,
+    metric_names::STORAGE_PARTITION_LOG_RECOVERIES_TOTAL,
+    metric_names::STORAGE_APPENDS_TOTAL,
+    metric_names::STORAGE_TRAILING_REPAIRS_TOTAL,
+    metric_names::STORAGE_ERRORS_TOTAL,
+];
+
+const PRIVATE_METRIC_STRINGS: &[&str] = &[
+    r#"{"ok":true}"#,
+    "payload",
+    "idem-1",
+    "message-1",
+    "delivery-1",
+    "consumer-1",
+    "group.1",
+    "secret",
+    "token",
+    "password",
+];
 
 fn timestamp(value: u64) -> MessageTimestamp {
     MessageTimestamp::from_unix_millis(value)
@@ -68,6 +111,11 @@ fn assert_json_content_type(headers: &HeaderMap) {
 fn router_with_temp_state(root: &TempDir) -> Router {
     let state = open_state(ControlApiConfig::new(root.path())).unwrap();
     build_router(state)
+}
+
+async fn metrics_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
 }
 
 fn envelope(id: impl AsRef<str>) -> msg_core::MessageEnvelope {
@@ -142,6 +190,8 @@ async fn health_and_readiness_return_ok() {
 
 #[tokio::test]
 async fn metrics_endpoint_returns_prometheus_text_with_known_names() {
+    let _guard = metrics_test_guard().await;
+    metrics::reset_for_tests();
     let root = TempDir::new().unwrap();
     let router = router_with_temp_state(&root);
 
@@ -154,9 +204,41 @@ async fn metrics_endpoint_returns_prometheus_text_with_known_names() {
         .unwrap_or_default();
     assert_eq!(content_type, PROMETHEUS_CONTENT_TYPE);
     let body = String::from_utf8(body).unwrap();
-    assert!(body.contains(metric_names::CONTROL_HTTP_REQUESTS_TOTAL));
-    assert!(body.contains(metric_names::CONTROL_TOPICS_CREATED_TOTAL));
-    assert!(body.contains(metric_names::BROKER_TOPICS_CREATED_TOTAL));
+    for name in ALL_METRIC_NAMES {
+        assert!(body.contains(&format!("# HELP {name} ")));
+        assert!(body.contains(&format!("# TYPE {name} counter")));
+    }
+    assert!(body.contains(
+        "ferrumq_control_http_requests_total{method=\"GET\",route=\"/metrics\",status=\"200\"} 1"
+    ));
+}
+
+#[tokio::test]
+async fn repeated_metrics_scrapes_only_increment_scrape_counter() {
+    let _guard = metrics_test_guard().await;
+    metrics::reset_for_tests();
+    let root = TempDir::new().unwrap();
+    let router = router_with_temp_state(&root);
+
+    let (_status, _headers, first) = send_raw(&router, empty_request("GET", "/metrics")).await;
+    let first_count = metrics::counter_value(
+        metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+        &[("method", "GET"), ("route", "/metrics"), ("status", "200")],
+    );
+    let (_status, _headers, second) = send_raw(&router, empty_request("GET", "/metrics")).await;
+    let second_count = metrics::counter_value(
+        metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+        &[("method", "GET"), ("route", "/metrics"), ("status", "200")],
+    );
+
+    assert_eq!(first_count, 1);
+    assert_eq!(second_count, 2);
+    let first = String::from_utf8(first).unwrap();
+    let second = String::from_utf8(second).unwrap();
+    assert_eq!(first.matches("# HELP ").count(), ALL_METRIC_NAMES.len());
+    assert_eq!(second.matches("# HELP ").count(), ALL_METRIC_NAMES.len());
+    assert!(first.contains("route=\"/metrics\",status=\"200\"} 1"));
+    assert!(second.contains("route=\"/metrics\",status=\"200\"} 2"));
 }
 
 #[tokio::test]
@@ -249,6 +331,8 @@ async fn topic_creation_and_errors_update_control_metrics() {
 
 #[tokio::test]
 async fn metrics_output_does_not_include_message_payloads() {
+    let _guard = metrics_test_guard().await;
+    metrics::reset_for_tests();
     let root = TempDir::new().unwrap();
     let router = seed_dlq_router(&root);
 
@@ -256,8 +340,14 @@ async fn metrics_output_does_not_include_message_payloads() {
 
     assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body).unwrap();
-    assert!(!body.contains(r#"{"ok":true}"#));
-    assert!(!body.contains("payload"));
+    for private in PRIVATE_METRIC_STRINGS {
+        assert!(
+            !body.contains(private),
+            "metrics output leaked private string {private:?}"
+        );
+    }
+    assert!(!body.contains("topic=\"orders\""));
+    assert!(!body.contains("consumer_id="));
 }
 
 #[tokio::test]
@@ -507,6 +597,112 @@ async fn status_reports_local_durable_counts() {
             .as_str()
             .unwrap()
             .contains(root.path().to_str().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn health_ready_status_and_unsupported_routes_update_http_metrics() {
+    let root = TempDir::new().unwrap();
+    let router = router_with_temp_state(&root);
+    let health_before = metrics::counter_value(
+        metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+        &[("method", "GET"), ("route", "/health"), ("status", "200")],
+    );
+    let ready_before = metrics::counter_value(
+        metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+        &[("method", "GET"), ("route", "/ready"), ("status", "200")],
+    );
+    let status_before = metrics::counter_value(
+        metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+        &[
+            ("method", "GET"),
+            ("route", "/v1/status"),
+            ("status", "200"),
+        ],
+    );
+    let not_found_before = metrics::counter_value(
+        metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+        &[
+            ("method", "UNKNOWN"),
+            ("route", "unmatched"),
+            ("status", "404"),
+            ("code", "NOT_FOUND"),
+        ],
+    );
+    let method_before = metrics::counter_value(
+        metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+        &[
+            ("method", "UNKNOWN"),
+            ("route", "method_not_allowed"),
+            ("status", "405"),
+            ("code", "METHOD_NOT_ALLOWED"),
+        ],
+    );
+
+    assert_eq!(
+        send(&router, empty_request("GET", "/health")).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&router, empty_request("GET", "/ready")).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&router, empty_request("GET", "/v1/status")).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&router, empty_request("GET", "/v1/missing")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(&router, empty_request("POST", "/health")).await.0,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+
+    assert!(
+        metrics::counter_value(
+            metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+            &[("method", "GET"), ("route", "/health"), ("status", "200")]
+        ) > health_before
+    );
+    assert!(
+        metrics::counter_value(
+            metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+            &[("method", "GET"), ("route", "/ready"), ("status", "200")]
+        ) > ready_before
+    );
+    assert!(
+        metrics::counter_value(
+            metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
+            &[
+                ("method", "GET"),
+                ("route", "/v1/status"),
+                ("status", "200")
+            ]
+        ) > status_before
+    );
+    assert!(
+        metrics::counter_value(
+            metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+            &[
+                ("method", "UNKNOWN"),
+                ("route", "unmatched"),
+                ("status", "404"),
+                ("code", "NOT_FOUND"),
+            ],
+        ) > not_found_before
+    );
+    assert!(
+        metrics::counter_value(
+            metric_names::CONTROL_HTTP_ERRORS_TOTAL,
+            &[
+                ("method", "UNKNOWN"),
+                ("route", "method_not_allowed"),
+                ("status", "405"),
+                ("code", "METHOD_NOT_ALLOWED"),
+            ],
+        ) > method_before
     );
 }
 

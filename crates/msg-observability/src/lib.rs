@@ -150,26 +150,43 @@ const COUNTERS: &[CounterDescriptor] = &[
 /// Initializes structured tracing from environment variables.
 ///
 /// `RUST_LOG` controls filtering. `FERRUMQ_LOG_FORMAT=json` selects JSON logs;
-/// every other value, including an unset value and `compact`, uses compact text.
+/// an unset value or `compact` uses compact text. Any other value is rejected.
 pub fn init_tracing_from_env() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
 
-    match env::var("FERRUMQ_LOG_FORMAT").as_deref() {
-        Ok("json") => {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(fmt::layer().json())
-                .try_init()?;
-        }
-        _ => {
+    match env::var("FERRUMQ_LOG_FORMAT") {
+        Ok(value) if value == "compact" => {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(fmt::layer().compact())
                 .try_init()?;
         }
+        Ok(value) if value == "json" => {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(fmt::layer().json())
+                .try_init()?;
+        }
+        Err(env::VarError::NotPresent) => {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(fmt::layer().compact())
+                .try_init()?;
+        }
+        Ok(value) => return Err(invalid_log_format(&value).into()),
+        Err(error) => return Err(error.into()),
     }
 
     Ok(())
+}
+
+fn invalid_log_format(value: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "invalid FERRUMQ_LOG_FORMAT value {value:?}; expected unset, \"compact\", or \"json\""
+        ),
+    )
 }
 
 /// Process-local metrics registry and recording helpers.
@@ -496,6 +513,22 @@ pub mod metrics {
         use super::*;
         use std::sync::{Mutex, OnceLock};
 
+        const ALLOWED_LABELS: &[&str] = &["method", "route", "status", "code", "kind"];
+        const PRIVATE_STRINGS: &[&str] = &[
+            r#"{"ok":true}"#,
+            "payload",
+            "idem-1",
+            "message-1",
+            "delivery-1",
+            "consumer-1",
+            "/tmp/ferrumq",
+            "/home/user/ferrumq",
+            "secret",
+            "token",
+            "password",
+            "topic=",
+        ];
+
         fn test_guard() -> std::sync::MutexGuard<'static, ()> {
             static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
             LOCK.get_or_init(|| Mutex::new(()))
@@ -516,6 +549,92 @@ pub mod metrics {
             assert!(output.contains(
                 "ferrumq_control_http_requests_total{method=\"GET\",route=\"/health\",status=\"200\"} 1"
             ));
+        }
+
+        #[test]
+        fn renders_descriptors_for_every_documented_counter() {
+            let _guard = test_guard();
+            reset_for_tests();
+
+            let output = render_prometheus();
+
+            for descriptor in COUNTERS {
+                assert!(
+                    output.contains(&format!("# HELP {} ", descriptor.name)),
+                    "missing HELP for {}",
+                    descriptor.name
+                );
+                assert!(
+                    output.contains(&format!("# TYPE {} counter", descriptor.name)),
+                    "missing TYPE for {}",
+                    descriptor.name
+                );
+            }
+        }
+
+        #[test]
+        fn helper_samples_use_only_allowed_label_names() {
+            let _guard = test_guard();
+            reset_for_tests();
+            record_control_http_request("GET", "/metrics", 200);
+            record_control_http_error("POST", "/v1/topics", 409, "TOPIC_ALREADY_EXISTS");
+            record_control_topic_create("success");
+            record_data_rpc_request("Publish", "ok");
+            record_data_rpc_error("Publish", "invalid_argument");
+            record_data_publish("success");
+            record_data_consume("success");
+            record_data_messages_delivered(1);
+            record_data_ack("success");
+            record_data_nack("success");
+            record_broker_open("success");
+            record_broker_recovery("success");
+            record_broker_topic_create("success");
+            record_broker_publish("success");
+            record_broker_consume("success");
+            record_broker_deliveries_created(1);
+            record_broker_ack("success");
+            record_broker_nack("success");
+            record_broker_retry_maintenance("success");
+            record_broker_dlq_transition("nack", 1);
+            record_storage_partition_log_open("success");
+            record_storage_partition_log_recovery("success");
+            record_storage_append("success");
+            record_storage_trailing_repair("checksum");
+            record_storage_error("io");
+
+            for line in render_prometheus()
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+            {
+                let Some(labels) = line
+                    .split_once('{')
+                    .and_then(|(_, rest)| rest.split_once('}'))
+                else {
+                    continue;
+                };
+
+                for label in labels.0.split(',') {
+                    let name = label.split_once('=').unwrap().0;
+                    assert!(
+                        ALLOWED_LABELS.contains(&name),
+                        "unexpected label {name:?} in {line:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn render_order_is_deterministic() {
+            let _guard = test_guard();
+            reset_for_tests();
+            record_control_http_request("GET", "/ready", 200);
+            record_control_http_request("GET", "/health", 200);
+            record_data_rpc_request("Publish", "ok");
+
+            let first = render_prometheus();
+            let second = render_prometheus();
+
+            assert_eq!(first, second);
         }
 
         #[test]
@@ -563,6 +682,62 @@ pub mod metrics {
         }
 
         #[test]
+        fn counters_are_monotonic_and_zero_increments_are_noops() {
+            let _guard = test_guard();
+            reset_for_tests();
+            increment_counter(metric_names::DATA_MESSAGES_DELIVERED_TOTAL, Vec::new(), 0);
+            assert_eq!(
+                counter_value(metric_names::DATA_MESSAGES_DELIVERED_TOTAL, &[]),
+                0
+            );
+
+            record_data_messages_delivered(2);
+            record_data_messages_delivered(3);
+
+            assert_eq!(
+                counter_value(metric_names::DATA_MESSAGES_DELIVERED_TOTAL, &[]),
+                5
+            );
+        }
+
+        #[test]
+        fn unknown_counter_or_label_lookup_returns_zero() {
+            let _guard = test_guard();
+            reset_for_tests();
+            record_data_publish("success");
+
+            assert_eq!(counter_value("ferrumq_unknown_total", &[]), 0);
+            assert_eq!(
+                counter_value(metric_names::DATA_PUBLISHES_TOTAL, &[("topic", "orders")]),
+                0
+            );
+        }
+
+        #[test]
+        fn reset_for_tests_clears_registry_for_exact_assertions() {
+            let _guard = test_guard();
+            reset_for_tests();
+            record_control_topic_create("success");
+            assert_eq!(
+                counter_value(
+                    metric_names::CONTROL_TOPICS_CREATED_TOTAL,
+                    &[("status", "success")]
+                ),
+                1
+            );
+
+            reset_for_tests();
+
+            assert_eq!(
+                counter_value(
+                    metric_names::CONTROL_TOPICS_CREATED_TOTAL,
+                    &[("status", "success")]
+                ),
+                0
+            );
+        }
+
+        #[test]
         fn helpers_do_not_emit_topic_or_payload_labels() {
             let _guard = test_guard();
             reset_for_tests();
@@ -577,6 +752,25 @@ pub mod metrics {
             assert!(!output.contains("message="));
             assert!(!output.contains("delivery="));
             assert!(!output.contains(r#"{"ok":true}"#));
+        }
+
+        #[test]
+        fn metrics_do_not_render_private_payload_or_identifier_strings() {
+            let _guard = test_guard();
+            reset_for_tests();
+            record_control_http_request("GET", "/metrics", 200);
+            record_data_rpc_request("Publish", "ok");
+            record_broker_dlq_transition("nack", 1);
+            record_storage_error("io");
+
+            let output = render_prometheus();
+
+            for private in PRIVATE_STRINGS {
+                assert!(
+                    !output.contains(private),
+                    "metrics output leaked private string {private:?}"
+                );
+            }
         }
     }
 }

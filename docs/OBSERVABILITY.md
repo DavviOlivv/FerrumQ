@@ -24,6 +24,10 @@ Log formatting is selected with `FERRUMQ_LOG_FORMAT`:
 - unset or `compact`: compact text logs.
 - `json`: JSON logs.
 
+Any other value fails startup for `brokerd serve` and `brokerd serve-grpc`.
+Commands that do not initialize tracing, such as `brokerd --version`, are not
+affected by this environment variable.
+
 Examples:
 
 ```sh
@@ -60,6 +64,15 @@ curl http://127.0.0.1:8080/metrics
 The endpoint returns Prometheus text exposition for the current process only.
 It includes `# HELP` and `# TYPE` lines for known counters and sample lines for
 counters observed in that process.
+
+Each successful scrape is counted as a normal HTTP request before rendering:
+
+```txt
+ferrumq_control_http_requests_total{method="GET",route="/metrics",status="200"}
+```
+
+Repeated scrapes only increment that scrape counter; they do not create new
+metric families or recursively record additional metrics.
 
 ## Metric Labels
 

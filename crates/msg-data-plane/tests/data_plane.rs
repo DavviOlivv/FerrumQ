@@ -11,6 +11,20 @@ use tonic::{Code, Request};
 
 const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 const FAR_FUTURE_MS: u64 = u64::MAX - 1_000_000;
+const PRIVATE_METRIC_STRINGS: &[&str] = &[
+    r#"{"ok":true}"#,
+    "payload",
+    "idem-1",
+    "message-1",
+    "message-2",
+    "delivery_id",
+    "consumer-1",
+    "group.1",
+    "same-idempotency-key",
+    "secret",
+    "token",
+    "password",
+];
 
 fn broker_config(max_attempts: u32, backoff_millis: Option<u64>) -> BrokerConfig {
     BrokerConfig::new(
@@ -295,6 +309,33 @@ async fn rpc_errors_update_sanitized_error_metrics() {
             &[("method", "Ack"), ("code", "failed_precondition")]
         ) > failed_ack_before
     );
+}
+
+#[tokio::test]
+async fn data_plane_metrics_omit_payload_idempotency_and_delivery_identifiers() {
+    let (_root, service) = service_with_topic(3, Some(1_000));
+
+    publish(&service, "message-1").await;
+    let consumed = consume_messages(&service, consume_request(20)).await;
+    service
+        .ack(Request::new(ack_request(
+            consumed[0].delivery_id.clone(),
+            "consumer-1",
+        )))
+        .await
+        .unwrap();
+
+    let output = metrics::render_prometheus();
+
+    for private in PRIVATE_METRIC_STRINGS {
+        assert!(
+            !output.contains(private),
+            "metrics output leaked private string {private:?}"
+        );
+    }
+    assert!(!output.contains("topic=\"orders\""));
+    assert!(!output.contains("delivery_id="));
+    assert!(!output.contains("consumer_id="));
 }
 
 #[tokio::test]

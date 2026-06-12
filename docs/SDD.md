@@ -178,7 +178,9 @@ Milestone 9 implements a focused local observability foundation.
 
 `brokerd serve` and `brokerd serve-grpc` initialize `tracing` from `RUST_LOG`.
 `FERRUMQ_LOG_FORMAT=json` selects JSON logs; unset or `compact` uses compact
-text. Startup logs include operation and listen address only.
+text. Other values fail startup for commands that initialize tracing; commands
+such as `brokerd --version` do not initialize tracing. Startup logs include
+operation and listen address only.
 
 HTTP control handlers, gRPC data-plane handlers, durable broker operations, and
 partition log storage paths emit stable spans/events with safe metadata:
@@ -192,6 +194,9 @@ control plane exposes `GET /metrics` with content type
 `text/plain; version=0.0.4; charset=utf-8`. Metrics use only `method`, `route`,
 `status`, `code`, and `kind` labels. Topic names, payloads, message IDs,
 delivery IDs, consumer IDs, and filesystem paths are not metric labels.
+Each successful `/metrics` scrape is counted once as
+`ferrumq_control_http_requests_total{method="GET",route="/metrics",status="200"}`
+before rendering.
 
 Metrics are process-local. If HTTP and gRPC run as separate processes,
 `GET /metrics` on the HTTP process reports only the HTTP process. Data-plane

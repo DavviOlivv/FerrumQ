@@ -14,6 +14,19 @@ fn version_command_succeeds() {
 }
 
 #[test]
+fn version_command_ignores_invalid_log_format() {
+    let output = brokerd()
+        .arg("--version")
+        .env("FERRUMQ_LOG_FORMAT", "xml")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("brokerd"));
+}
+
+#[test]
 fn serve_help_documents_defaults() {
     let output = brokerd().args(["serve", "--help"]).output().unwrap();
 
@@ -51,6 +64,43 @@ fn invalid_listen_address_fails_cleanly() {
 }
 
 #[test]
+fn serve_rejects_invalid_log_format() {
+    let output = brokerd()
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env("FERRUMQ_LOG_FORMAT", "xml")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid FERRUMQ_LOG_FORMAT value"));
+    assert!(stderr.contains("compact"));
+    assert!(stderr.contains("json"));
+}
+
+#[test]
+fn serve_accepts_compact_and_json_log_formats() {
+    for format in ["compact", "json"] {
+        let data_dir = tempfile::NamedTempFile::new().unwrap();
+        let output = brokerd()
+            .args(["serve", "--data-dir"])
+            .arg(data_dir.path())
+            .args(["--listen", "127.0.0.1:0"])
+            .env("FERRUMQ_LOG_FORMAT", format)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("OpenState"),
+            "expected accepted format {format:?} to reach state opening, got {stderr:?}"
+        );
+        assert!(!stderr.contains("invalid FERRUMQ_LOG_FORMAT value"));
+    }
+}
+
+#[test]
 fn invalid_grpc_listen_address_fails_cleanly() {
     let output = brokerd()
         .args(["serve-grpc", "--listen", "not-a-socket-address"])
@@ -61,6 +111,43 @@ fn invalid_grpc_listen_address_fails_cleanly() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("invalid value"));
     assert!(stderr.contains("--listen"));
+}
+
+#[test]
+fn serve_grpc_rejects_invalid_log_format() {
+    let output = brokerd()
+        .args(["serve-grpc", "--listen", "127.0.0.1:0"])
+        .env("FERRUMQ_LOG_FORMAT", "xml")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid FERRUMQ_LOG_FORMAT value"));
+    assert!(stderr.contains("compact"));
+    assert!(stderr.contains("json"));
+}
+
+#[test]
+fn serve_grpc_accepts_compact_and_json_log_formats() {
+    for format in ["compact", "json"] {
+        let data_dir = tempfile::NamedTempFile::new().unwrap();
+        let output = brokerd()
+            .args(["serve-grpc", "--data-dir"])
+            .arg(data_dir.path())
+            .args(["--listen", "127.0.0.1:0"])
+            .env("FERRUMQ_LOG_FORMAT", format)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("OpenState"),
+            "expected accepted format {format:?} to reach state opening, got {stderr:?}"
+        );
+        assert!(!stderr.contains("invalid FERRUMQ_LOG_FORMAT value"));
+    }
 }
 
 #[test]
