@@ -1,71 +1,91 @@
 SHELL := /usr/bin/bash
 
-.PHONY: fmt lint typecheck test test-rust test-ts test-integration test-e2e build audit ci
+.PHONY: \
+	rust-fmt rust-fmt-check rust-check rust-clippy rust-test rust-nextest rust-deny \
+	ts-format ts-format-check ts-lint ts-typecheck ts-test ts-build \
+	fmt lint typecheck test build smoke hygiene ci
 
-fmt:
+rust-fmt:
 	cargo fmt --all
+
+rust-fmt-check:
+	cargo fmt --all --check
+
+rust-check:
+	cargo check --workspace
+
+rust-clippy:
+	cargo clippy --workspace --all-targets -- -D warnings
+
+rust-test:
+	cargo test --workspace
+
+rust-nextest:
+	cargo nextest run --workspace
+
+rust-deny:
+	cargo deny check
+
+ts-format:
 	pnpm format
 
-lint:
-	cargo clippy --workspace --all-targets -- -D warnings
+ts-format-check:
+	pnpm format:check
+
+ts-lint:
 	pnpm lint
 
-typecheck:
-	cargo check --workspace
+ts-typecheck:
 	pnpm typecheck
 
-test: test-rust test-ts test-integration test-e2e
-
-test-rust:
-	if command -v cargo-nextest >/dev/null 2>&1; then \
-		cargo nextest run --workspace; \
-	else \
-		echo "cargo-nextest not installed; falling back to cargo test."; \
-		cargo test --workspace; \
-	fi
-
-test-ts:
+ts-test:
 	pnpm test
 
-test-integration:
-	echo "Milestone 0: no dedicated integration tests yet."
+ts-build:
+	pnpm build
 
-test-e2e:
-	echo "Milestone 0: no end-to-end tests yet."
+fmt: rust-fmt ts-format
+
+lint: rust-clippy ts-lint
+
+typecheck: rust-check ts-typecheck
+
+test: rust-test rust-nextest ts-test
 
 build:
 	cargo build --workspace
 	pnpm build
 
-audit:
-	if command -v cargo-deny >/dev/null 2>&1; then \
-		cargo deny check; \
-	else \
-		echo "Milestone 0: cargo-deny is not installed; audit is a documented non-breaking follow-up."; \
-	fi
+smoke:
+	node packages/cli/dist/cli.js --version
+	node packages/cli/dist/cli.js --help
+	node packages/cli/dist/cli.js topic --help
+	node packages/cli/dist/cli.js publish --help
+	node packages/tui/dist/cli.js --version
+	node packages/tui/dist/cli.js --help
+	cargo run -p msg-runtime --bin brokerd -- --version
+
+hygiene:
+	git diff --check
 
 ci:
 	cargo fmt --all --check
 	cargo check --workspace
 	cargo clippy --workspace --all-targets -- -D warnings
-	if command -v cargo-nextest >/dev/null 2>&1; then \
-		cargo nextest run --workspace; \
-	else \
-		echo "cargo-nextest not installed; falling back to cargo test."; \
-		cargo test --workspace; \
-	fi
-	cargo build --workspace
+	cargo test --workspace
+	cargo nextest run --workspace
+	cargo deny check
 	pnpm install --frozen-lockfile
 	pnpm format:check
 	pnpm lint
 	pnpm typecheck
 	pnpm test
 	pnpm build
-	node packages/tui/dist/cli.js --version
-	node packages/tui/dist/cli.js --help
-	pnpm --filter @ferrumq/cli build
 	node packages/cli/dist/cli.js --version
 	node packages/cli/dist/cli.js --help
 	node packages/cli/dist/cli.js topic --help
 	node packages/cli/dist/cli.js publish --help
-	$(MAKE) audit
+	node packages/tui/dist/cli.js --version
+	node packages/tui/dist/cli.js --help
+	cargo run -p msg-runtime --bin brokerd -- --version
+	git diff --check

@@ -1,10 +1,15 @@
 # Protocol
 
-This document describes protocol contracts. Milestone 6 adds the first protobuf/gRPC data-plane contract. Milestone 7 expands the TypeScript protocol package into a small CLI-facing helper surface with HTTP Zod schemas, FerrumQ error-envelope schemas, gRPC URL normalization, dynamic proto loading, and a unary data-plane client helper.
+This document describes protocol contracts. FerrumQ currently has a
+protobuf/gRPC data-plane contract and a TypeScript protocol package with HTTP
+Zod schemas, FerrumQ error-envelope schemas, gRPC URL normalization, dynamic
+proto loading, and a unary data-plane client helper.
 
 ## Message Envelope
 
-FerrumQ uses a CloudEvents-inspired envelope. The project does not implement full CloudEvents compatibility in Milestone 0, but future message metadata should align with standard event concepts:
+FerrumQ uses a CloudEvents-inspired envelope. The project does not implement
+full CloudEvents compatibility, but future message metadata should align with
+standard event concepts:
 
 ```json
 {
@@ -25,8 +30,8 @@ Initial HTTP/control plane APIs should use JSON DTOs with explicit versioning. T
 
 ## TypeScript Protocol Helper
 
-`@ferrumq/protocol` is not a public SDK in Milestone 7. It exports the small
-contract helpers needed by `@ferrumq/cli`:
+`@ferrumq/protocol` is not a public SDK. It exports the small contract helpers
+needed by `@ferrumq/cli`:
 
 - Zod schemas for HTTP control-plane success DTOs and FerrumQ error envelopes.
 - DTO types for topic, status, DLQ, and data-plane command responses.
@@ -41,13 +46,15 @@ contract helpers needed by `@ferrumq/cli`:
 Dynamic gRPC loading uses decimal strings for `uint64` response values so CLI
 JSON output does not lose precision for offsets or timestamps.
 
-Milestone 7 TypeScript tests use mocked raw gRPC clients and proto-loading
-failure seams. Real service semantics stay covered by Rust in-process gRPC
-tests until broker runtime port discovery exists for `127.0.0.1:0`.
+TypeScript tests use mocked raw gRPC clients and proto-loading failure seams.
+Real service semantics stay covered by Rust in-process gRPC tests until broker
+runtime port discovery exists for `127.0.0.1:0`.
 
 ## gRPC Data Plane
 
-Milestone 6 defines `ferrumq.dataplane.v1.FerrumQDataPlane` in `crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto` and exposes generated Rust types from `msg-protocol`.
+`ferrumq.dataplane.v1.FerrumQDataPlane` is defined in
+`crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto`, and generated
+Rust types are exposed from `msg-protocol`.
 
 The service is unary-only:
 
@@ -64,16 +71,19 @@ The service is unary-only:
 
 ## Observability Boundary
 
-Milestone 9 does not change protobuf messages or service methods. The
+Observability does not change protobuf messages or service methods. The
 `msg-data-plane` adapter records local structured spans and process-local
-counters for `Publish`, `Consume`, `Ack`, and `Nack`. Metrics use sanitized gRPC
-code strings such as `ok`, `invalid_argument`, `not_found`, and
+counters for `Publish`, `Consume`, `Ack`, and `Nack`. Metrics use sanitized
+gRPC code strings such as `ok`, `invalid_argument`, `not_found`, and
 `failed_precondition`; message payloads, topics, message IDs, delivery IDs, and
 consumer IDs are not metric labels.
 
 ## Versioning Strategy
 
-Protocol versions should be explicit in API paths, protobuf packages, or schema metadata. Breaking changes require a new version. Compatible additions should prefer optional fields with documented defaults. The Milestone 6 protobuf package version is `ferrumq.dataplane.v1`.
+Protocol versions should be explicit in API paths, protobuf packages, or schema
+metadata. Breaking changes require a new version. Compatible additions should
+prefer optional fields with documented defaults. The current protobuf package
+version is `ferrumq.dataplane.v1`.
 
 ## Compatibility Rules
 

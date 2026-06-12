@@ -1,6 +1,12 @@
 # Testing Strategy
 
-FerrumQ uses Harness Engineering from the first commit. Milestone 0 established the validation harness. Milestone 1 keeps those commands green and adds focused Rust coverage for the pure `msg-core` domain layer. Milestone 2 adds broker behavior coverage for synchronous in-memory delivery semantics. Milestone 3 adds filesystem-backed storage coverage for the local append-only log foundation. Milestone 4 adds durable broker reopen coverage for local at-least-once delivery. Milestone 5 adds control-plane HTTP adapter coverage against Axum routers without fixed ports. Milestone 6 adds protobuf generation exposure tests and in-process tonic coverage for the local gRPC data plane. Milestone 7 adds TypeScript CLI coverage against parser/config seams plus mocked HTTP and gRPC clients. Milestone 8 adds TypeScript TUI coverage against config, loader, rendering, and keyboard seams. Milestone 9 adds Rust observability coverage for tracing-safe code paths and process-local metrics.
+FerrumQ uses Harness Engineering from the first commit. The current harness
+covers Rust formatting, checking, linting, unit and integration tests, nextest,
+dependency policy checks, TypeScript formatting, linting, typechecking, tests,
+builds, built CLI/TUI smoke checks, `brokerd --version`, and repository
+hygiene. Historical milestone sections below explain how coverage accumulated
+across the domain, broker, storage, HTTP, gRPC, CLI, TUI, and observability
+surfaces.
 
 ## Unit Tests
 
@@ -58,25 +64,28 @@ Process-level TypeScript gRPC integration is deferred because `brokerd serve-grp
 
 ## CI Gates
 
-The local and CI gates are:
+The local and CI release gate is `make ci`, which runs:
 
 - `cargo fmt --all --check`.
 - `cargo check --workspace`.
 - `cargo clippy --workspace --all-targets -- -D warnings`.
-- `cargo test --workspace` or `cargo nextest run --workspace` when available.
-- `cargo build --workspace`.
-- `cargo run -p msg-runtime --bin brokerd -- --version`.
-- `cargo run -p msg-runtime --bin brokerd -- serve-grpc --help`.
+- `cargo test --workspace`.
+- `cargo nextest run --workspace`.
+- `cargo deny check`.
 - `pnpm install --frozen-lockfile`.
 - `pnpm format:check`.
 - `pnpm lint`.
 - `pnpm typecheck`.
 - `pnpm test`.
 - `pnpm build`.
-- `node packages/tui/dist/cli.js --version`.
-- `node packages/tui/dist/cli.js --help`.
-- `pnpm --filter @ferrumq/cli build`.
 - `node packages/cli/dist/cli.js --version`.
 - `node packages/cli/dist/cli.js --help`.
+- `node packages/cli/dist/cli.js topic --help`.
+- `node packages/cli/dist/cli.js publish --help`.
+- `node packages/tui/dist/cli.js --version`.
+- `node packages/tui/dist/cli.js --help`.
+- `cargo run -p msg-runtime --bin brokerd -- --version`.
+- `git diff --check`.
 
-`cargo-deny` is recommended. Missing global audit tooling is a non-breaking fallback until the project standardizes required local tool installation.
+`cargo deny check` can emit a duplicate `hashbrown` warning. It is non-fatal
+only when the command exits successfully.

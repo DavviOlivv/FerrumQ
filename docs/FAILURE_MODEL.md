@@ -1,6 +1,7 @@
 # Failure Model
 
-This document describes target behavior. Milestone 0 only creates placeholders and documentation.
+This document describes target and current failure behavior for the local
+broker foundation.
 
 ## Producer Retry
 
@@ -12,7 +13,9 @@ If a consumer crashes after delivery but before ACK, the message may be delivere
 
 ## Broker Crash
 
-After a broker crash, durable messages must be recoverable according to the configured durability policy. In-memory milestone behavior can lose messages, but durable milestones must document and test recovery expectations.
+After a broker crash, durable messages must be recoverable according to the
+configured durability policy. The in-memory broker can lose messages, while the
+durable broker documents and tests recovery expectations for local state.
 
 ## Storage Write Failure
 
@@ -20,7 +23,9 @@ A failed append must not be reported as a successful publish. Partial writes mus
 
 ## Partial Segment Write
 
-Future segment records require length, checksum, and offset metadata so recovery can identify incomplete records. Recovery should stop at the last valid record and preserve evidence for inspection.
+Segment records include length, checksum, and offset metadata so recovery can
+identify incomplete records. Recovery stops at the last valid final-segment
+record for repairable trailing damage.
 
 ## Corrupted Record
 

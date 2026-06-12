@@ -31,38 +31,13 @@ jobs:
           node-version: lts/*
           cache: pnpm
 
-      - name: Rust format
-        run: cargo fmt --all --check
+      - name: Install Rust validation tools
+        run: |
+          cargo install cargo-nextest --locked
+          cargo install cargo-deny --locked
 
-      - name: Rust check
-        run: cargo check --workspace
-
-      - name: Rust clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Rust tests
-        run: cargo test --workspace
-
-      - name: Rust build
-        run: cargo build --workspace
-
-      - name: Install TypeScript dependencies
+      - name: Prime TypeScript dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: TypeScript format
-        run: pnpm format:check
-
-      - name: TypeScript lint
-        run: pnpm lint
-
-      - name: TypeScript typecheck
-        run: pnpm typecheck
-
-      - name: TypeScript tests
-        run: pnpm test
-
-      - name: TypeScript build
-        run: pnpm build
 
       - name: Local harness
         run: make ci

@@ -243,6 +243,8 @@ async fn repeated_metrics_scrapes_only_increment_scrape_counter() {
 
 #[tokio::test]
 async fn topic_creation_and_errors_update_control_metrics() {
+    let _guard = metrics_test_guard().await;
+    metrics::reset_for_tests();
     let root = TempDir::new().unwrap();
     let router = router_with_temp_state(&root);
     let created_before = metrics::counter_value(
@@ -602,6 +604,8 @@ async fn status_reports_local_durable_counts() {
 
 #[tokio::test]
 async fn health_ready_status_and_unsupported_routes_update_http_metrics() {
+    let _guard = metrics_test_guard().await;
+    metrics::reset_for_tests();
     let root = TempDir::new().unwrap();
     let router = router_with_temp_state(&root);
     let health_before = metrics::counter_value(
