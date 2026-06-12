@@ -1,5 +1,5 @@
 import { render } from "ink";
-import { createElement } from "react";
+import { createElement, type ReactElement } from "react";
 
 import { FerrumQTui } from "./components.js";
 import {
@@ -16,8 +16,13 @@ export interface TuiCliOutput {
   writeError?(message: string): void;
 }
 
+export type TuiRenderer = (element: ReactElement) => {
+  waitUntilExit(): Promise<unknown>;
+};
+
 export interface RunTuiCliOptions {
   env?: TuiEnvironment;
+  renderTui?: TuiRenderer;
 }
 
 export async function runTuiCli(
@@ -38,7 +43,8 @@ export async function runTuiCli(
     }
 
     const config = resolveTuiConfig(parsed, options.env);
-    const instance = render(createElement(FerrumQTui, { config }));
+    const renderTui: TuiRenderer = options.renderTui ?? render;
+    const instance = renderTui(createElement(FerrumQTui, { config }));
     await instance.waitUntilExit();
     return 0;
   } catch (error) {

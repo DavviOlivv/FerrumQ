@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createControlPlaneClient } from "@ferrumq/protocol";
 import { render } from "ink-testing-library";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -12,6 +13,8 @@ import {
   FerrumQTui,
   HelpView,
   TopicsView,
+  TuiFrame,
+  TuiLoadError,
   defaultControlUrl,
   defaultGrpcUrl,
   loadTuiSnapshot,
@@ -20,6 +23,7 @@ import {
   runTuiCli,
   tuiVersion,
   type TuiConfig,
+  type TuiRenderer,
   type TuiSnapshot,
 } from "../src/index.js";
 
@@ -43,11 +47,14 @@ const config: TuiConfig = {
 };
 
 describe("TUI config", () => {
-  it("uses defaults, environment overrides, and flag overrides", () => {
+  it("uses default URLs when flags and environment are absent", () => {
     expect(resolveTuiConfig({}, {})).toEqual({
       controlUrl: defaultControlUrl,
       grpcUrl: defaultGrpcUrl,
     });
+  });
+
+  it("uses environment-only values", () => {
     expect(
       resolveTuiConfig(
         {},
@@ -60,6 +67,9 @@ describe("TUI config", () => {
       controlUrl: "https://env.local:8443",
       grpcUrl: "http://env.local:9090",
     });
+  });
+
+  it("uses CLI flags over environment values", () => {
     expect(
       resolveTuiConfig(
         {
@@ -74,6 +84,21 @@ describe("TUI config", () => {
     ).toEqual({
       controlUrl: "http://flag.local:8080",
       grpcUrl: "http://flag.local:9090",
+    });
+  });
+
+  it("normalizes trailing slashes", () => {
+    expect(
+      resolveTuiConfig(
+        {
+          controlUrl: "http://control.local:8080/",
+          grpcUrl: "http://grpc.local:9090/",
+        },
+        {},
+      ),
+    ).toEqual({
+      controlUrl: "http://control.local:8080",
+      grpcUrl: "http://grpc.local:9090",
     });
   });
 
@@ -100,7 +125,23 @@ describe("TUI config", () => {
     });
   });
 
-  it("rejects invalid URLs", () => {
+  it("rejects argument contract violations", () => {
+    expect(() => parseTuiArgs(["--wat"])).toThrow("Unknown option: --wat");
+    expect(() => parseTuiArgs(["dashboard"])).toThrow(
+      "Unknown argument: dashboard",
+    );
+    expect(() => parseTuiArgs(["--control-url"])).toThrow(
+      "--control-url requires a value",
+    );
+    expect(() => parseTuiArgs(["--grpc-url="])).toThrow(
+      "--grpc-url requires a value",
+    );
+    expect(() => parseTuiArgs(["--help", "--version"])).toThrow(
+      "--help and --version cannot be combined",
+    );
+  });
+
+  it("rejects invalid control URLs", () => {
     expect(() => resolveTuiConfig({ controlUrl: "not-a-url" }, {})).toThrow(
       "control URL must be a valid URL",
     );
@@ -111,11 +152,20 @@ describe("TUI config", () => {
       resolveTuiConfig({ controlUrl: "http://user@broker.local" }, {}),
     ).toThrow("control URL must not include credentials");
     expect(() =>
+      resolveTuiConfig({ controlUrl: "http://broker.local:8080/api" }, {}),
+    ).toThrow("control URL must not include a path, query, or fragment");
+  });
+
+  it("rejects invalid gRPC URLs", () => {
+    expect(() =>
       resolveTuiConfig({ grpcUrl: "https://broker.local:9090" }, {}),
     ).toThrow("gRPC URL TLS/HTTPS is deferred; use http://host:port");
     expect(() =>
       resolveTuiConfig({ grpcUrl: "http://broker.local" }, {}),
     ).toThrow("gRPC URL must include a port");
+    expect(() =>
+      resolveTuiConfig({ grpcUrl: "http://broker.local:9090/api" }, {}),
+    ).toThrow("gRPC URL must not include a path, query, or fragment");
   });
 });
 
@@ -176,6 +226,32 @@ describe("TUI loader", () => {
     ]);
   });
 
+  it("reports partial refresh failures as one stackless message", async () => {
+    const client = sampleClient({
+      async health() {
+        throw new Error("health exploded");
+      },
+      async ready() {
+        throw new Error("ready exploded");
+      },
+    });
+
+    await expect(loadTuiSnapshot(config, { client })).rejects.toMatchObject({
+      name: "TuiLoadError",
+      message: "control API refresh failed: health exploded (2 total failures)",
+      failures: [expect.any(Error), expect.any(Error)],
+    } satisfies Partial<TuiLoadError>);
+
+    await loadTuiSnapshot(config, { client }).catch((error: unknown) => {
+      expect(String(error)).toBe(
+        "TuiLoadError: control API refresh failed: health exploded (2 total failures)",
+      );
+      expect(error).toBeInstanceOf(TuiLoadError);
+      expect((error as Error).message).not.toContain("\n");
+      expect((error as Error).message).not.toContain(" at ");
+    });
+  });
+
   it("formats expected refresh failures without stack traces", async () => {
     for (const [pathSuffix, responseLike, expected] of [
       [
@@ -233,6 +309,84 @@ describe("TUI loader", () => {
 });
 
 describe("TUI rendering", () => {
+  it("renders frame chrome and dashboard state", () => {
+    const snapshot = sampleSnapshot();
+    const view = render(
+      <TuiFrame
+        config={config}
+        state={{
+          activeView: "dashboard",
+          snapshot,
+          loading: false,
+          error: undefined,
+          refreshCount: 1,
+          lastRefreshAt: snapshot.refreshedAt,
+        }}
+      />,
+    );
+
+    expect(view.lastFrame()).toContain(`FerrumQ ${tuiVersion}`);
+    expect(view.lastFrame()).toContain("view: dashboard");
+    expect(view.lastFrame()).toContain(
+      "control URL: http://control.local:8080",
+    );
+    expect(view.lastFrame()).toContain("gRPC URL: http://grpc.local:9090");
+    expect(view.lastFrame()).toContain("health: ok");
+    expect(view.lastFrame()).toContain("readiness: ready");
+    expect(view.lastFrame()).toContain("broker mode: durable");
+    expect(view.lastFrame()).toContain("topic count: 2");
+    expect(view.lastFrame()).toContain("DLQ count: 1");
+    expect(view.lastFrame()).toContain(
+      "last refresh: 2026-06-11T12:00:00.000Z",
+    );
+    expect(view.lastFrame()).toContain("last error: none");
+    expect(view.lastFrame()).toContain("refreshes=1");
+    expect(view.lastFrame()).toContain(
+      "keys: 1 dashboard 2 topics 3 DLQ ? help r refresh q quit",
+    );
+    view.unmount();
+  });
+
+  it("renders loading and error states before the first snapshot", () => {
+    const loading = render(
+      <TuiFrame
+        config={config}
+        state={{
+          activeView: "topics",
+          snapshot: undefined,
+          loading: true,
+          error: undefined,
+          refreshCount: 0,
+          lastRefreshAt: undefined,
+        }}
+      />,
+    );
+    expect(loading.lastFrame()).toContain("view: topics | loading");
+    expect(loading.lastFrame()).toContain("Loading broker snapshot...");
+    expect(loading.lastFrame()).not.toContain("no topics");
+    loading.unmount();
+
+    const errored = render(
+      <TuiFrame
+        config={config}
+        state={{
+          activeView: "dlq",
+          snapshot: undefined,
+          loading: false,
+          error: "control API refresh failed: status exploded",
+          refreshCount: 1,
+          lastRefreshAt: new Date("2026-06-11T12:00:00.000Z"),
+        }}
+      />,
+    );
+    expect(errored.lastFrame()).toContain(
+      "control API refresh failed: status exploded",
+    );
+    expect(errored.lastFrame()).not.toContain("no DLQ entries");
+    expect(errored.lastFrame()).not.toContain("No broker snapshot loaded");
+    errored.unmount();
+  });
+
   it("renders dashboard status and counts", () => {
     const view = render(
       <DashboardView
@@ -257,6 +411,9 @@ describe("TUI rendering", () => {
     expect(view.lastFrame()).toContain("broker mode: durable");
     expect(view.lastFrame()).toContain("topic count: 2");
     expect(view.lastFrame()).toContain("DLQ count: 1");
+    expect(view.lastFrame()).toContain(
+      "last refresh: 2026-06-11T12:00:00.000Z",
+    );
     expect(view.lastFrame()).toContain("last error: none");
     view.unmount();
 
@@ -446,8 +603,7 @@ describe("TUI interactions", () => {
     view.unmount();
   });
 
-  it("handles refresh, view keys, help, and quit", async () => {
-    const onExit = vi.fn();
+  it.each(["r", "R"])("handles %s refresh key", async (key) => {
     let healthCalls = 0;
     const client = sampleClient({
       async health() {
@@ -462,47 +618,209 @@ describe("TUI interactions", () => {
           client,
           now: () => new Date("2026-06-11T12:00:00.000Z"),
         }}
-        onExit={onExit}
       />,
     );
 
     await waitForFrame(view, "refreshes=1");
-    view.stdin.write("2");
-    await waitForFrame(view, "orders partitions=3");
-    view.stdin.write("3");
-    await waitForFrame(view, "orders[0]@42");
-    view.stdin.write("?");
-    await waitForFrame(view, "q quit");
-    view.stdin.write("1");
-    await waitForFrame(view, "broker mode: durable");
-
-    view.stdin.write("r");
+    view.stdin.write(key);
     await vi.waitFor(() => expect(healthCalls).toBe(2));
     await waitForFrame(view, "refreshes=2");
+    view.unmount();
+  });
 
-    view.stdin.write("q");
+  it.each([
+    ["1", "topics", "broker mode: durable"],
+    ["2", "dashboard", "orders partitions=3"],
+    ["3", "dashboard", "orders[0]@42"],
+    ["?", "dashboard", "view: help"],
+  ] as const)("handles %s view key", async (key, initialView, expected) => {
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: sampleClient() }}
+        initialView={initialView}
+        initialSnapshot={sampleSnapshot()}
+      />,
+    );
+
+    view.stdin.write(key);
+    await waitForFrame(view, expected);
+    view.unmount();
+  });
+
+  it.each(["q", "Q"])("handles %s quit key", async (key) => {
+    const onExit = vi.fn();
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: pendingClient() }}
+        initialSnapshot={sampleSnapshot()}
+        onExit={onExit}
+      />,
+    );
+
+    view.stdin.write(key);
     await vi.waitFor(() => expect(onExit).toHaveBeenCalledTimes(1));
+    view.unmount();
+  });
+
+  it("ignores unsupported keys", async () => {
+    let healthCalls = 0;
+    const client = sampleClient({
+      async health() {
+        healthCalls += 1;
+        return { status: "ok" };
+      },
+    });
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client }}
+        initialSnapshot={sampleSnapshot()}
+      />,
+    );
+
+    await vi.waitFor(() => expect(healthCalls).toBe(1));
+    view.stdin.write("x");
+    await flushAsync();
+    expect(view.lastFrame()).toContain("view: dashboard");
+    expect(view.lastFrame()).toContain("broker mode: durable");
+    expect(healthCalls).toBe(1);
+    view.unmount();
+  });
+
+  it("ignores stale results when refreshing while already loading", async () => {
+    const controlled = controlledSnapshotClient();
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: controlled.client }}
+      />,
+    );
+
+    await vi.waitFor(() => expect(controlled.attempts).toHaveLength(1));
+    view.stdin.write("r");
+    await vi.waitFor(() => expect(controlled.attempts).toHaveLength(2));
+
+    controlled.attempts[1]?.resolve(updatedSnapshot());
+    await waitForFrame(view, "topic count: 1");
+    expect(view.lastFrame()).toContain("refreshes=1");
+
+    controlled.attempts[0]?.resolve(sampleSnapshot());
+    await flushAsync();
+    expect(view.lastFrame()).toContain("topic count: 1");
+    expect(view.lastFrame()).not.toContain("topic count: 2");
+    expect(view.lastFrame()).toContain("refreshes=1");
     view.unmount();
   });
 });
 
 describe("TUI CLI runner", () => {
-  it("prints version and help without resolving invalid env", async () => {
-    await expect(captureRun(["--version"])).resolves.toEqual({
+  it("prints version without resolving invalid env or rendering Ink", async () => {
+    const renderer = rendererSpy();
+
+    await expect(
+      captureRun(["--version"], {
+        env: {
+          FERRUMQ_CONTROL_URL: "not-a-url",
+          FERRUMQ_GRPC_URL: "https://broker.local:9090",
+        },
+        renderTui: renderer.renderTui,
+      }),
+    ).resolves.toEqual({
       code: 0,
       stdout: [tuiVersion],
       stderr: [],
     });
+    expect(renderer.renderTui).not.toHaveBeenCalled();
+  });
+
+  it("prints help without resolving invalid env or rendering Ink", async () => {
+    const renderer = rendererSpy();
 
     const help = await captureRun(["--help"], {
       env: {
         FERRUMQ_CONTROL_URL: "not-a-url",
         FERRUMQ_GRPC_URL: "https://broker.local:9090",
       },
+      renderTui: renderer.renderTui,
     });
     expect(help.code).toBe(0);
     expect(help.stderr).toEqual([]);
     expect(help.stdout.join("\n")).toContain("ferrumq-tui");
+    expect(renderer.renderTui).not.toHaveBeenCalled();
+  });
+
+  it("renders Ink with resolved flag configuration", async () => {
+    const renderer = rendererSpy();
+
+    await expect(
+      captureRun(
+        [
+          "--control-url",
+          "http://flag-control.local:8080",
+          "--grpc-url=http://flag-grpc.local:9090",
+        ],
+        {
+          env: {
+            FERRUMQ_CONTROL_URL: "http://env-control.local:8080",
+            FERRUMQ_GRPC_URL: "http://env-grpc.local:9090",
+          },
+          renderTui: renderer.renderTui,
+        },
+      ),
+    ).resolves.toEqual({ code: 0, stdout: [], stderr: [] });
+
+    expect(renderer.renderTui).toHaveBeenCalledTimes(1);
+    expect(renderer.waitUntilExit).toHaveBeenCalledTimes(1);
+    expect(tuiElementConfig(renderer.elements[0])).toEqual({
+      controlUrl: "http://flag-control.local:8080",
+      grpcUrl: "http://flag-grpc.local:9090",
+    });
+  });
+
+  it.each([
+    [["--bogus"], "Unknown option: --bogus"],
+    [["orphan"], "Unknown argument: orphan"],
+    [["--control-url"], "--control-url requires a value"],
+    [["--grpc-url="], "--grpc-url requires a value"],
+    [["--help", "--version"], "--help and --version cannot be combined"],
+    [
+      ["--control-url", "ftp://broker.local"],
+      "control URL must use http:// or https://",
+    ],
+    [
+      ["--grpc-url", "https://broker.local:9090"],
+      "gRPC URL TLS/HTTPS is deferred; use http://host:port",
+    ],
+  ] as const)(
+    "returns a stackless error for %s",
+    async (args, expectedError) => {
+      const renderer = rendererSpy();
+      const result = await captureRun(args, { renderTui: renderer.renderTui });
+
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toEqual([]);
+      expect(result.stderr).toEqual([expectedError]);
+      expect(result.stderr.join("\n")).not.toContain("ExpectedTuiError");
+      expect(result.stderr.join("\n")).not.toContain(" at ");
+      expect(renderer.renderTui).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns a stackless config error for invalid environment values", async () => {
+    const renderer = rendererSpy();
+    const result = await captureRun([], {
+      env: { FERRUMQ_CONTROL_URL: "http://user@broker.local:8080" },
+      renderTui: renderer.renderTui,
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toEqual([]);
+    expect(result.stderr).toEqual(["control URL must not include credentials"]);
+    expect(result.stderr.join("\n")).not.toContain("ExpectedTuiError");
+    expect(result.stderr.join("\n")).not.toContain(" at ");
+    expect(renderer.renderTui).not.toHaveBeenCalled();
   });
 });
 
@@ -527,7 +845,7 @@ describeBuiltCli("built TUI CLI smoke", () => {
 
 async function captureRun(
   args: readonly string[],
-  options: { env?: Record<string, string> } = {},
+  options: { env?: Record<string, string>; renderTui?: TuiRenderer } = {},
 ): Promise<{ code: number; stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -545,6 +863,25 @@ async function captureRun(
   );
 
   return { code, stdout, stderr };
+}
+
+function rendererSpy() {
+  const elements: ReactElement[] = [];
+  const waitUntilExit = vi.fn<() => Promise<void>>(async () => undefined);
+  const renderTui = vi.fn<TuiRenderer>((element) => {
+    elements.push(element);
+    return { waitUntilExit };
+  });
+
+  return { renderTui, waitUntilExit, elements };
+}
+
+function tuiElementConfig(element: ReactElement | undefined): TuiConfig {
+  if (element === undefined) {
+    throw new Error("expected TUI element to be rendered");
+  }
+
+  return (element as ReactElement<{ config: TuiConfig }>).props.config;
 }
 
 async function runBuiltCli(
@@ -732,6 +1069,73 @@ function sampleClient(
   };
 }
 
+interface ControlledSnapshotAttempt {
+  resolve(snapshot: TuiSnapshot): void;
+  reject(error: unknown): void;
+}
+
+function controlledSnapshotClient(): {
+  client: ControlPlaneClient;
+  attempts: ControlledSnapshotAttempt[];
+} {
+  const attempts: Array<
+    ControlledSnapshotAttempt & { promise: Promise<TuiSnapshot> }
+  > = [];
+  let activeAttempt:
+    | (ControlledSnapshotAttempt & { promise: Promise<TuiSnapshot> })
+    | undefined;
+
+  function startAttempt(): ControlledSnapshotAttempt & {
+    promise: Promise<TuiSnapshot>;
+  } {
+    let resolveAttempt!: (snapshot: TuiSnapshot) => void;
+    let rejectAttempt!: (error: unknown) => void;
+    const promise = new Promise<TuiSnapshot>((resolve, reject) => {
+      resolveAttempt = resolve;
+      rejectAttempt = reject;
+    });
+    const attempt = {
+      promise,
+      resolve: resolveAttempt,
+      reject: rejectAttempt,
+    };
+    attempts.push(attempt);
+    activeAttempt = attempt;
+    return attempt;
+  }
+
+  function currentAttempt(): ControlledSnapshotAttempt & {
+    promise: Promise<TuiSnapshot>;
+  } {
+    if (activeAttempt === undefined) {
+      throw new Error("snapshot attempt has not started");
+    }
+
+    return activeAttempt;
+  }
+
+  return {
+    attempts,
+    client: sampleClient({
+      async health() {
+        return startAttempt().promise.then((snapshot) => snapshot.health);
+      },
+      async ready() {
+        return currentAttempt().promise.then((snapshot) => snapshot.readiness);
+      },
+      async status() {
+        return currentAttempt().promise.then((snapshot) => snapshot.status);
+      },
+      async listTopics() {
+        return currentAttempt().promise.then((snapshot) => snapshot.topics);
+      },
+      async listDlq() {
+        return currentAttempt().promise.then((snapshot) => snapshot.dlq);
+      },
+    }),
+  };
+}
+
 function successFetchWith(
   pathSuffix: string,
   failure: ResponseLike,
@@ -796,6 +1200,12 @@ async function waitForFrame(
   expected: string,
 ): Promise<void> {
   await vi.waitFor(() => expect(view.lastFrame()).toContain(expected));
+}
+
+async function flushAsync(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 function renderChunk(chunk: unknown): string {

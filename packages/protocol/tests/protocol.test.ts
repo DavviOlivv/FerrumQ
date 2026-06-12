@@ -111,6 +111,98 @@ describe("HTTP schemas", () => {
 });
 
 describe("HTTP control-plane client", () => {
+  it.each([
+    {
+      name: "GET /health",
+      requestPath: "/health",
+      payload: { status: "ok" },
+      request: (client: ReturnType<typeof createControlPlaneClient>) =>
+        client.health(),
+      expected: { status: "ok" },
+    },
+    {
+      name: "GET /ready",
+      requestPath: "/ready",
+      payload: { status: "ready" },
+      request: (client: ReturnType<typeof createControlPlaneClient>) =>
+        client.ready(),
+      expected: { status: "ready" },
+    },
+    {
+      name: "GET /v1/status",
+      requestPath: "/v1/status",
+      payload: {
+        mode: "durable",
+        dataDir: "./.ferrumq",
+        topics: 2,
+        dlqEntries: 1,
+      },
+      request: (client: ReturnType<typeof createControlPlaneClient>) =>
+        client.status(),
+      expected: {
+        mode: "durable",
+        dataDir: "./.ferrumq",
+        topics: 2,
+        dlqEntries: 1,
+      },
+    },
+    {
+      name: "GET /v1/topics",
+      requestPath: "/v1/topics",
+      payload: { items: [{ name: "orders", partitions: 3 }] },
+      request: (client: ReturnType<typeof createControlPlaneClient>) =>
+        client.listTopics(),
+      expected: { items: [{ name: "orders", partitions: 3 }] },
+    },
+    {
+      name: "GET /v1/dlq",
+      requestPath: "/v1/dlq",
+      payload: {
+        items: [
+          {
+            topic: "orders",
+            partition: 0,
+            offset: 42,
+            messageId: "message-1",
+            consumerGroupId: "workers",
+            reason: "poison",
+            attemptCount: 3,
+            timestamp: 1_700_000_000_000,
+          },
+        ],
+      },
+      request: (client: ReturnType<typeof createControlPlaneClient>) =>
+        client.listDlq(),
+      expected: {
+        items: [
+          {
+            topic: "orders",
+            partition: 0,
+            offset: 42,
+            messageId: "message-1",
+            consumerGroupId: "workers",
+            reason: "poison",
+            attemptCount: 3,
+            timestamp: 1_700_000_000_000,
+          },
+        ],
+      },
+    },
+  ])("maps $name success responses", async (testCase) => {
+    const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+      expect(init?.method).toBe("GET");
+      expect(input).toBe(`http://control.local:8080${testCase.requestPath}`);
+      return response(200, testCase.payload);
+    });
+    const client = createControlPlaneClient(
+      "http://control.local:8080/",
+      fetchImpl,
+    );
+
+    await expect(testCase.request(client)).resolves.toEqual(testCase.expected);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("maps successful control-plane requests and DTOs", async () => {
     const calls: Array<{
       input: string;
@@ -195,7 +287,16 @@ describe("HTTP control-plane client", () => {
     );
     await expect(ferrumQClient.status()).rejects.toMatchObject({
       kind: "ferrumq-error",
+      method: "GET",
       message: "HTTP 409 TOPIC_ALREADY_EXISTS: topic exists",
+      status: 409,
+      url: "http://control.local:8080/v1/status",
+      ferrumqError: {
+        code: "TOPIC_ALREADY_EXISTS",
+        message: "topic exists",
+        details: {},
+        statusCode: 409,
+      },
     });
 
     const malformedErrorClient = createControlPlaneClient(
@@ -205,6 +306,8 @@ describe("HTTP control-plane client", () => {
     await expect(malformedErrorClient.status()).rejects.toMatchObject({
       kind: "malformed-error",
       message: "HTTP 418: Teapot",
+      status: 418,
+      statusText: "Teapot",
     });
 
     const networkClient = createControlPlaneClient(
@@ -215,6 +318,8 @@ describe("HTTP control-plane client", () => {
     );
     await expect(networkClient.ready()).rejects.toMatchObject({
       kind: "network",
+      method: "GET",
+      url: "http://control.local:8080/ready",
       message:
         "Network request failed for GET http://control.local:8080/ready: connection refused",
     });
@@ -225,7 +330,22 @@ describe("HTTP control-plane client", () => {
     );
     await expect(invalidJsonClient.health()).rejects.toMatchObject({
       kind: "invalid-json",
+      method: "GET",
+      url: "http://control.local:8080/health",
       message: "Unexpected response from control API: invalid JSON",
+    });
+
+    const invalidJsonHttpErrorClient = createControlPlaneClient(
+      "http://control.local:8080",
+      vi.fn<FetchLike>(async () => invalidJsonResponse(500, "Server Error")),
+    );
+    await expect(invalidJsonHttpErrorClient.status()).rejects.toMatchObject({
+      kind: "malformed-error",
+      method: "GET",
+      url: "http://control.local:8080/v1/status",
+      status: 500,
+      statusText: "Server Error",
+      message: "HTTP 500: Server Error",
     });
 
     const schemaMismatchClient = createControlPlaneClient(
@@ -234,6 +354,11 @@ describe("HTTP control-plane client", () => {
     );
     await expect(schemaMismatchClient.health()).rejects.toMatchObject({
       kind: "schema",
+      method: "GET",
+      url: "http://control.local:8080/health",
+      validationIssues: expect.arrayContaining([
+        expect.objectContaining({ path: ["status"] }),
+      ]),
     });
   });
 

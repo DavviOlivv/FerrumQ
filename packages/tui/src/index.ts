@@ -33,4 +33,5 @@ export {
   runTuiCli,
   type RunTuiCliOptions,
   type TuiCliOutput,
+  type TuiRenderer,
 } from "./runner.js";
