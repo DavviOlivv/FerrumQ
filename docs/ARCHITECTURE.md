@@ -12,7 +12,7 @@ The monolith is modular through crate boundaries:
 - `msg-protocol`: shared protocol DTOs and serialization boundaries. Milestone 6 adds protobuf definitions and generated tonic/prost Rust types for `ferrumq.dataplane.v1`.
 - `msg-storage`: local durable storage adapter/foundation. Milestone 3 implements a synchronous segment-backed append-only log per topic partition with framed JSON message records, CRC32 checksums, zero-based gapless offset assignment for successful appends, segment rolling, reopen recovery, and final-segment trailing-record repair.
 - `msg-broker`: broker orchestration and delivery flow. Milestone 2 implements `BrokerService` as synchronous deterministic in-memory state with topic creation, publish, consume, ACK, NACK, retry maintenance, lease expiry, and in-memory DLQ. Milestone 4 adds `DurableBroker`, a synchronous local durable broker that uses `msg-storage` for message records and a JSONL broker-state log for topic metadata and delivery transitions.
-- `msg-runtime`: daemon entrypoints, configuration, and runtime wiring. Milestone 5 wires `brokerd serve` to the local control-plane HTTP router. Milestone 6 wires `brokerd serve-grpc` to the local data-plane gRPC service.
+- `msg-runtime`: daemon entrypoints, configuration, and runtime wiring. Milestone 5 wires `brokerd serve` to the local control-plane HTTP router. Milestone 6 wires `brokerd serve-grpc` to the local data-plane gRPC service. Milestone 11 adds `brokerd serve-all`, which serves both adapters in one process with one shared local durable broker.
 - `msg-control-api`: Axum control plane adapter. Milestone 5 implements health, readiness, status, topic admin, topic inspection, and DLQ inspection endpoints backed by `DurableBroker`.
 - `msg-data-plane`: tonic gRPC data-plane adapter. Milestone 6 implements unary publish, consume, ACK, and NACK RPCs backed by `DurableBroker`.
 - `msg-observability`: shared observability helpers. Milestone 9 implements
@@ -46,6 +46,16 @@ storage, HTTP, and gRPC adapters record counters when they run in the same
 process. Metrics use only low-cardinality labels and do not export payloads,
 topic labels, delivery labels, full filesystem paths, or secrets.
 
+Milestone 11 adds a unified local runtime without changing broker, HTTP,
+gRPC, storage, or protobuf contracts. `brokerd serve-all` opens durable state
+once, builds the HTTP router from that `AppState`, and builds the gRPC service
+from the same `Arc<Mutex<DurableBroker>>`. This is the recommended local demo
+and development runtime because HTTP topic creation, gRPC
+publish/consume/ACK/NACK, HTTP status/DLQ, and HTTP `/metrics` observe one live
+process-local state. `brokerd serve` and `brokerd serve-grpc` remain
+split-process modes with startup-loaded state and separate process-local
+metrics.
+
 Planned dependency direction:
 
 ```txt
@@ -72,17 +82,19 @@ Milestone 8 exposes a read-only `ferrumq-tui` view of the control plane. It fetc
 
 Milestone 9 exposes process-local metrics through the HTTP control plane at
 `GET /metrics`. This keeps metrics operational and read-only while preserving
-the data-plane API for publish, consume, ACK, and NACK. If HTTP and gRPC run as
-separate processes, the HTTP metrics endpoint reports only the HTTP process;
-data-plane metrics aggregation is deferred.
+the data-plane API for publish, consume, ACK, and NACK. Milestone 11 makes those
+metrics locally coherent for demos when both adapters run under `serve-all`.
+If HTTP and gRPC run as separate processes, the HTTP metrics endpoint reports
+only the HTTP process; data-plane metrics aggregation is deferred.
 
-In the current runtime shape, `brokerd serve` and `brokerd serve-grpc` are also
-separate local processes with separate in-memory broker instances. Each opens
-`DurableBroker` state from `--data-dir` at startup. Sharing a data directory
-persists state across process restarts, but it does not provide live reload,
-cross-process synchronization, or live HTTP/TUI inspection of mutations made by
-an already-running gRPC process. A combined runtime or explicit reload/sync
-mechanism is deferred.
+`brokerd serve-all` is now the recommended local runtime shape. `brokerd serve`
+and `brokerd serve-grpc` are still valid separate local processes with separate
+in-memory broker instances. Each opens `DurableBroker` state from `--data-dir`
+at startup. Sharing a data directory persists state across process restarts,
+but it does not provide live reload, cross-process synchronization, or live
+HTTP/TUI inspection of mutations made by an already-running gRPC process.
+`serve-all` solves live state and metrics coherence only inside one process;
+cross-process reload/sync remains deferred.
 
 ## Future Distributed Evolution
 

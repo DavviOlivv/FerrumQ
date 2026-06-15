@@ -30,9 +30,17 @@ consume, delivery, ACK, NACK, storage append, and sanitized RPC error counters.
 Broker/storage coverage verifies DLQ transition counters and final trailing
 repair counters without fixed ports or sleeps.
 
+Milestone 11 runtime integration tests start the unified local runtime on
+pre-bound ephemeral HTTP and gRPC listeners. They create a topic through real
+HTTP, publish/consume/ACK through real gRPC, fetch HTTP status, scrape
+`/metrics`, and assert that topic creation plus gRPC publish, consume, and ACK
+counters are present in one process-local registry. Runtime CLI tests also
+cover `serve-all --help`, invalid HTTP and gRPC listen addresses, invalid data
+directories, invalid tracing format behavior, and HTTP/gRPC bind failures.
+
 ## End-to-End Tests
 
-Future E2E tests will launch the broker runtime and use CLI/SDK flows for create topic, publish, consume, ACK/NACK, retries, and DLQ inspection. Milestone 5 adds runtime smoke coverage for `brokerd --version`, `brokerd serve --help`, and invalid listen-address parsing. Milestone 6 adds `brokerd serve-grpc --help`, invalid gRPC listen-address coverage, and invalid gRPC data-directory failure coverage, but it does not add process-level gRPC E2E tests yet.
+Future E2E tests will launch the broker runtime and use CLI/SDK flows for create topic, publish, consume, ACK/NACK, retries, and DLQ inspection. Milestone 5 adds runtime smoke coverage for `brokerd --version`, `brokerd serve --help`, and invalid listen-address parsing. Milestone 6 adds `brokerd serve-grpc --help`, invalid gRPC listen-address coverage, and invalid gRPC data-directory failure coverage. Milestone 11 adds a Rust process-level unified runtime test through real sockets without fixed ports.
 
 ## Property-Based Tests
 
@@ -60,7 +68,12 @@ Use `vitest` for TypeScript unit tests and lightweight built-entrypoint smoke te
 
 Milestone 8 protocol tests cover the shared HTTP control-plane client, including endpoint-specific success mapping, FerrumQ error envelopes, malformed non-2xx bodies, network failures, invalid JSON, and schema mismatches. TUI tests cover config defaults/env/flags, URL validation, stackless CLI errors, loader success and refresh failures, dashboard/topics/DLQ/help rendering, `r`, `R`, `1`, `2`, `3`, `?`, `q`, `Q`, unsupported keyboard interactions, stale refresh protection, and built `ferrumq-tui --version` and `--help` smoke checks.
 
-Process-level TypeScript gRPC integration is deferred because `brokerd serve-grpc --listen 127.0.0.1:0` does not expose the selected port; Rust in-process gRPC tests cover the service semantics. TUI behavior should remain component and command-boundary coverage without reimplementing Rust broker semantics.
+Process-level TypeScript gRPC integration is deferred because `brokerd
+serve-grpc --listen 127.0.0.1:0` and `brokerd serve-all --grpc-listen
+127.0.0.1:0` do not expose the selected port; Rust in-process gRPC tests and
+the Rust unified-runtime socket test cover service semantics. TUI behavior
+should remain component and command-boundary coverage without reimplementing
+Rust broker semantics.
 
 ## CI Gates
 

@@ -47,8 +47,8 @@ Dynamic gRPC loading uses decimal strings for `uint64` response values so CLI
 JSON output does not lose precision for offsets or timestamps.
 
 TypeScript tests use mocked raw gRPC clients and proto-loading failure seams.
-Real service semantics stay covered by Rust in-process gRPC tests until broker
-runtime port discovery exists for `127.0.0.1:0`.
+Real service semantics stay covered by Rust in-process gRPC tests and the Rust
+unified-runtime integration test that binds ephemeral listeners directly.
 
 ## gRPC Data Plane
 
@@ -69,6 +69,22 @@ The service is unary-only:
 
 `AckRequest` carries required `delivery_id` and `consumer_id` strings. `NackRequest` carries required `delivery_id` and `consumer_id` strings plus optional `reason`; empty or whitespace-only reasons use the broker default.
 
+For local coherent demos and development, run the protobuf service through the
+unified runtime:
+
+```sh
+cargo run -p msg-runtime --bin brokerd -- serve-all \
+  --data-dir ./.ferrumq \
+  --http-listen 127.0.0.1:8080 \
+  --grpc-listen 127.0.0.1:9090
+```
+
+`serve-all` shares one process-local `DurableBroker` between HTTP topic
+creation/status/DLQ/metrics and gRPC publish/consume/ACK/NACK. `brokerd
+serve-grpc` remains a gRPC-only runtime. In split-process mode, `brokerd serve`
+and `brokerd serve-grpc` each load durable state at startup, do not live-reload
+peer process mutations, and keep separate process-local metrics.
+
 ## Observability Boundary
 
 Observability does not change protobuf messages or service methods. The
@@ -76,7 +92,9 @@ Observability does not change protobuf messages or service methods. The
 counters for `Publish`, `Consume`, `Ack`, and `Nack`. Metrics use sanitized
 gRPC code strings such as `ok`, `invalid_argument`, `not_found`, and
 `failed_precondition`; message payloads, topics, message IDs, delivery IDs, and
-consumer IDs are not metric labels.
+consumer IDs are not metric labels. With `serve-all`, HTTP `/metrics` exposes
+these gRPC counters because both adapters run in one process. With
+`serve-grpc` alone, there is no HTTP metrics endpoint in that gRPC-only process.
 
 ## Versioning Strategy
 

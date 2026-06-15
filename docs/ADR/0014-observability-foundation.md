@@ -55,9 +55,10 @@ FerrumQ gets useful local observability without adding a collector, dashboard,
 remote exporter, or hosted telemetry assumptions. Tests can assert metrics
 through the same process-local registry used by the adapters.
 
-Metrics are not cross-process aggregated. When `brokerd serve` and
-`brokerd serve-grpc` run as separate processes, `/metrics` on the HTTP process
-reports only that HTTP process.
+Metrics are not cross-process aggregated. When HTTP and gRPC run in one process
+through `brokerd serve-all`, `/metrics` reports counters from both adapters.
+When `brokerd serve` and `brokerd serve-grpc` run as separate processes,
+`/metrics` on the HTTP process reports only that HTTP process.
 
 Dashboards, OpenTelemetry export, collectors, hosted telemetry, auth/TLS for
 metrics, rate limiting, clustering/replication metrics, exactly-once telemetry,

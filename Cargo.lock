@@ -644,8 +644,12 @@ dependencies = [
  "msg-control-api",
  "msg-data-plane",
  "msg-observability",
+ "msg-protocol",
+ "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
 ]

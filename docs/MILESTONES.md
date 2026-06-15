@@ -293,3 +293,42 @@ Deferred from Milestone 9:
 - Dependency audit.
 - Benchmarks.
 - Docs reconciliation.
+
+## Milestone 11: Unified Runtime / Single-Process Broker
+
+- `brokerd serve-all`.
+- Shared HTTP control plane and gRPC data plane in one process.
+- One process-local `DurableBroker` and metrics registry for local demos.
+
+Status: implemented as the recommended local demo/development runtime in
+`crates/msg-runtime`.
+
+Implemented scope:
+
+- `brokerd serve-all --data-dir ./.ferrumq --http-listen 127.0.0.1:8080 --grpc-listen 127.0.0.1:9090`.
+- `msg-runtime` library serving functions that accept pre-bound HTTP and gRPC
+  listeners for ephemeral-port tests.
+- Both HTTP and gRPC listeners are bound before serving starts, so bind
+  failures are reported before long-running tasks are left behind.
+- Durable state is opened once through `msg_control_api::open_state`.
+- The HTTP router uses that `AppState`.
+- The gRPC data plane uses `DataPlaneService::from_shared(state.broker())`.
+- The synchronization model remains `Arc<Mutex<DurableBroker>>`, matching the
+  existing adapters and synchronous local-filesystem broker.
+- `brokerd serve` remains HTTP-only, `brokerd serve-grpc` remains gRPC-only,
+  and `brokerd --version` remains a no-tracing local command.
+- Runtime tests cover `serve-all --help`, invalid HTTP and gRPC listen
+  addresses, invalid data directories, invalid log-format behavior, bind
+  failures, and a real ephemeral-listener HTTP+gRPC shared-state flow.
+- Documentation in [LOCAL_DEMO.md](LOCAL_DEMO.md), [CLI.md](CLI.md),
+  [TUI.md](TUI.md), [API.md](API.md), [PROTOCOL.md](PROTOCOL.md),
+  [OBSERVABILITY.md](OBSERVABILITY.md), and ADR
+  [0015](ADR/0015-unified-runtime-single-process-broker.md).
+
+Deferred from Milestone 11:
+
+- Cross-process live reload, distributed locking, cluster mode, replication,
+  shared metrics aggregation across processes, auth/TLS/rate limiting, web
+  dashboard, OpenTelemetry collector integration, hosted or SaaS telemetry,
+  exactly-once delivery, protobuf changes, HTTP/gRPC error shape changes, and
+  storage format changes.

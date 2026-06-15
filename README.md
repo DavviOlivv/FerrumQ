@@ -71,19 +71,23 @@ pnpm build
 cargo build --workspace
 ```
 
-Use a local data directory for both demos:
+Use a local data directory:
 
 ```sh
 mkdir -p ./.ferrumq
 ```
 
-First, run the HTTP control-plane demo. Start the HTTP server:
+Start the recommended local demo/dev runtime. It serves HTTP and gRPC in one
+OS process backed by one shared local `DurableBroker`:
 
 ```sh
-cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
+cargo run -p msg-runtime --bin brokerd -- serve-all \
+  --data-dir ./.ferrumq \
+  --http-listen 127.0.0.1:8080 \
+  --grpc-listen 127.0.0.1:9090
 ```
 
-Create and inspect a topic:
+In another shell, create and inspect a topic:
 
 ```sh
 node packages/cli/dist/cli.js topic create orders --partitions 3
@@ -91,22 +95,7 @@ node packages/cli/dist/cli.js topic list
 node packages/cli/dist/cli.js topic get orders
 ```
 
-Inspect process-local HTTP metrics:
-
-```sh
-curl http://127.0.0.1:8080/metrics
-```
-
-Stop the HTTP process before starting the gRPC data-plane demo. The topic
-metadata remains on disk under `./.ferrumq`.
-
-Start the gRPC server:
-
-```sh
-cargo run -p msg-runtime --bin brokerd -- serve-grpc --data-dir ./.ferrumq --listen 127.0.0.1:9090
-```
-
-Publish and consume a message:
+Publish and consume a message through gRPC:
 
 ```sh
 node packages/cli/dist/cli.js publish orders --data '{"orderId":1}' --key account-1
@@ -120,13 +109,20 @@ node packages/cli/dist/cli.js ack <delivery-id>
 node packages/cli/dist/cli.js nack <delivery-id> --reason poison
 ```
 
-`brokerd serve` and `brokerd serve-grpc` are separate local processes. Each
-opens its own `DurableBroker` state at startup. A shared `--data-dir` persists
-state across restarts, but running processes do not live-reload each other's
-changes or share in-memory state. Do not expect an already-running HTTP process
-or TUI to show live gRPC-process changes. `/metrics` is also process-local; in
-the split-process setup, HTTP `/metrics` does not expose gRPC counters. A
-combined runtime or reload/sync mechanism is deferred.
+Inspect process-local metrics from the shared runtime:
+
+```sh
+curl http://127.0.0.1:8080/metrics
+```
+
+`brokerd serve-all` is recommended for coherent local demos and development:
+HTTP topic creation, gRPC publish/consume/ACK/NACK, HTTP status/DLQ, and HTTP
+`/metrics` all observe the same live process-local state. `brokerd serve`
+remains HTTP-only, and `brokerd serve-grpc` remains gRPC-only. In that
+split-process mode, each process opens state at startup, does not live-reload
+peer process mutations, and has its own process-local metrics. `serve-all`
+solves live state and metrics coherence only inside one process; cross-process
+reload, locking, and metrics aggregation remain deferred.
 
 For a fuller walkthrough, see [docs/LOCAL_DEMO.md](docs/LOCAL_DEMO.md).
 

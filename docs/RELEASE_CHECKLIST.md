@@ -35,11 +35,15 @@ candidate.
 - [API.md](API.md), [CLI.md](CLI.md), [TUI.md](TUI.md), and
   [OBSERVABILITY.md](OBSERVABILITY.md) do not overclaim production readiness.
 - Release-facing docs mention `/metrics` as process-local operational data.
-- Release-facing quickstarts document that `brokerd serve` and
-  `brokerd serve-grpc` are split local processes that load state at startup;
-  shared `--data-dir` persists state across restarts but does not provide live
-  shared in-memory state, live reload, live HTTP/TUI inspection of gRPC-process
-  changes, or shared HTTP `/metrics` counters.
+- Release-facing quickstarts use `brokerd serve-all` as the recommended local
+  coherent demo/dev runtime.
+- Release-facing docs document that `brokerd serve` is HTTP-only and
+  `brokerd serve-grpc` is gRPC-only. Split local processes load state at
+  startup; shared `--data-dir` persists state across restarts but does not
+  provide live shared in-memory state, live reload, live HTTP/TUI inspection of
+  gRPC-process changes, or shared HTTP `/metrics` counters.
+- Release-facing docs state that `serve-all` solves live state and metrics
+  coherence only inside one process, not cross-process reload or aggregation.
 - Release-facing docs mention that payloads are not logged by default and are
   not metric labels.
 - Any remaining milestone history is clearly historical or deep reference

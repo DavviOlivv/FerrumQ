@@ -1,7 +1,96 @@
-use std::process::Command;
+use std::{net::SocketAddr, process::Command, sync::OnceLock};
+
+use msg_observability::{metric_names, metrics};
+use msg_protocol::ferrumq::dataplane::v1::{
+    AckRequest, ConsumeRequest, PublishRequest, ferrum_q_data_plane_client::FerrumQDataPlaneClient,
+};
+use serde_json::{Value, json};
+use tempfile::{NamedTempFile, TempDir};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::{Mutex, oneshot},
+};
 
 fn brokerd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_brokerd"))
+}
+
+async fn metrics_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
+
+fn publish_request(message_id: &str) -> PublishRequest {
+    PublishRequest {
+        topic: "orders".to_owned(),
+        message_id: message_id.to_owned(),
+        key: "account-1".to_owned(),
+        payload: br#"{"ok":true}"#.to_vec(),
+        content_type: "application/json".to_owned(),
+        r#type: "order.created".to_owned(),
+        source: "/runtime-test".to_owned(),
+        subject: "subject-1".to_owned(),
+        idempotency_key: "idem-1".to_owned(),
+        time_unix_ms: 1_700_000_000_000,
+    }
+}
+
+fn consume_request(now_unix_ms: u64) -> ConsumeRequest {
+    ConsumeRequest {
+        topic: "orders".to_owned(),
+        consumer_group: "group.1".to_owned(),
+        consumer_id: "consumer-1".to_owned(),
+        max_messages: 10,
+        lease_ms: 1_000,
+        now_unix_ms,
+    }
+}
+
+async fn http_json(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (u16, String) {
+    let body = body.map_or_else(String::new, |body| body.to_string());
+    let content_headers = if body.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+    };
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n{content_headers}\r\n{body}"
+    );
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    parse_http_response(&response)
+}
+
+fn parse_http_response(response: &[u8]) -> (u16, String) {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HTTP response should include headers");
+    let headers = std::str::from_utf8(&response[..header_end]).unwrap();
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .expect("HTTP response should include numeric status");
+    let body = String::from_utf8(response[header_end + 4..].to_vec()).unwrap();
+    (status, body)
+}
+
+fn reserve_port() -> std::net::TcpListener {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
 #[test]
@@ -51,6 +140,20 @@ fn serve_grpc_help_documents_defaults() {
 }
 
 #[test]
+fn serve_all_help_documents_defaults() {
+    let output = brokerd().args(["serve-all", "--help"]).output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--data-dir"));
+    assert!(stdout.contains("./.ferrumq"));
+    assert!(stdout.contains("--http-listen"));
+    assert!(stdout.contains("127.0.0.1:8080"));
+    assert!(stdout.contains("--grpc-listen"));
+    assert!(stdout.contains("127.0.0.1:9090"));
+}
+
+#[test]
 fn invalid_listen_address_fails_cleanly() {
     let output = brokerd()
         .args(["serve", "--listen", "not-a-socket-address"])
@@ -61,6 +164,32 @@ fn invalid_listen_address_fails_cleanly() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("invalid value"));
     assert!(stderr.contains("--listen"));
+}
+
+#[test]
+fn invalid_serve_all_http_listen_address_fails_cleanly() {
+    let output = brokerd()
+        .args(["serve-all", "--http-listen", "not-a-socket-address"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid value"));
+    assert!(stderr.contains("--http-listen"));
+}
+
+#[test]
+fn invalid_serve_all_grpc_listen_address_fails_cleanly() {
+    let output = brokerd()
+        .args(["serve-all", "--grpc-listen", "not-a-socket-address"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid value"));
+    assert!(stderr.contains("--grpc-listen"));
 }
 
 #[test]
@@ -79,9 +208,30 @@ fn serve_rejects_invalid_log_format() {
 }
 
 #[test]
+fn serve_all_rejects_invalid_log_format() {
+    let output = brokerd()
+        .args([
+            "serve-all",
+            "--http-listen",
+            "127.0.0.1:0",
+            "--grpc-listen",
+            "127.0.0.1:0",
+        ])
+        .env("FERRUMQ_LOG_FORMAT", "xml")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid FERRUMQ_LOG_FORMAT value"));
+    assert!(stderr.contains("compact"));
+    assert!(stderr.contains("json"));
+}
+
+#[test]
 fn serve_accepts_compact_and_json_log_formats() {
     for format in ["compact", "json"] {
-        let data_dir = tempfile::NamedTempFile::new().unwrap();
+        let data_dir = NamedTempFile::new().unwrap();
         let output = brokerd()
             .args(["serve", "--data-dir"])
             .arg(data_dir.path())
@@ -131,7 +281,7 @@ fn serve_grpc_rejects_invalid_log_format() {
 #[test]
 fn serve_grpc_accepts_compact_and_json_log_formats() {
     for format in ["compact", "json"] {
-        let data_dir = tempfile::NamedTempFile::new().unwrap();
+        let data_dir = NamedTempFile::new().unwrap();
         let output = brokerd()
             .args(["serve-grpc", "--data-dir"])
             .arg(data_dir.path())
@@ -152,7 +302,7 @@ fn serve_grpc_accepts_compact_and_json_log_formats() {
 
 #[test]
 fn serve_grpc_invalid_data_dir_file_fails_cleanly() {
-    let data_dir = tempfile::NamedTempFile::new().unwrap();
+    let data_dir = NamedTempFile::new().unwrap();
     let output = brokerd()
         .args(["serve-grpc", "--data-dir"])
         .arg(data_dir.path())
@@ -164,4 +314,151 @@ fn serve_grpc_invalid_data_dir_file_fails_cleanly() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("OpenState"));
     assert!(stderr.contains("AlreadyExists"));
+}
+
+#[test]
+fn serve_all_invalid_data_dir_file_fails_cleanly() {
+    let data_dir = NamedTempFile::new().unwrap();
+    let output = brokerd()
+        .args(["serve-all", "--data-dir"])
+        .arg(data_dir.path())
+        .args([
+            "--http-listen",
+            "127.0.0.1:0",
+            "--grpc-listen",
+            "127.0.0.1:0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("OpenState"));
+    assert!(stderr.contains("AlreadyExists"));
+}
+
+#[test]
+fn serve_all_http_bind_failure_fails_cleanly() {
+    let data_dir = TempDir::new().unwrap();
+    let reserved = reserve_port();
+    let addr = reserved.local_addr().unwrap().to_string();
+    let output = brokerd()
+        .args(["serve-all", "--data-dir"])
+        .arg(data_dir.path())
+        .args(["--http-listen", &addr, "--grpc-listen", "127.0.0.1:0"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("BindHttp"));
+    assert!(stderr.contains(&addr));
+}
+
+#[test]
+fn serve_all_grpc_bind_failure_fails_cleanly() {
+    let data_dir = TempDir::new().unwrap();
+    let reserved = reserve_port();
+    let addr = reserved.local_addr().unwrap().to_string();
+    let output = brokerd()
+        .args(["serve-all", "--data-dir"])
+        .arg(data_dir.path())
+        .args(["--http-listen", "127.0.0.1:0", "--grpc-listen", &addr])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("BindGrpc"));
+    assert!(stderr.contains(&addr));
+}
+
+#[tokio::test]
+async fn serve_all_shares_http_grpc_state_and_metrics() {
+    let _guard = metrics_test_guard().await;
+    metrics::reset_for_tests();
+    let data_dir = TempDir::new().unwrap();
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_addr = http_listener.local_addr().unwrap();
+    let grpc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let grpc_addr = grpc_listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_data_dir = data_dir.path().to_path_buf();
+
+    let server = tokio::spawn(async move {
+        msg_runtime::serve_all_with_listeners(
+            server_data_dir,
+            http_listener,
+            grpc_listener,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+    });
+
+    let (status, body) = http_json(
+        http_addr,
+        "POST",
+        "/v1/topics",
+        Some(json!({ "name": "orders", "partitions": 1 })),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({ "name": "orders", "partitions": 1 })
+    );
+
+    let mut client = FerrumQDataPlaneClient::connect(format!("http://{grpc_addr}"))
+        .await
+        .unwrap();
+    let published = client
+        .publish(publish_request("message-1"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(published.topic, "orders");
+    assert_eq!(published.offset, 0);
+
+    let consumed = client
+        .consume(consume_request(10))
+        .await
+        .unwrap()
+        .into_inner()
+        .messages;
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0].message_id, "message-1");
+
+    client
+        .ack(AckRequest {
+            delivery_id: consumed[0].delivery_id.clone(),
+            consumer_id: "consumer-1".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let (status, body) = http_json(http_addr, "GET", "/v1/status", None).await;
+    assert_eq!(status, 200);
+    let status_body = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(status_body["topics"], 1);
+    assert_eq!(status_body["dlqEntries"], 0);
+
+    let (status, metrics_body) = http_json(http_addr, "GET", "/metrics", None).await;
+    assert_eq!(status, 200);
+    assert!(metrics_body.contains("ferrumq_control_topics_created_total{status=\"success\"} 1"));
+    assert!(metrics_body.contains("ferrumq_data_publishes_total{status=\"success\"} 1"));
+    assert!(metrics_body.contains("ferrumq_data_consumes_total{status=\"success\"} 1"));
+    assert!(metrics_body.contains("ferrumq_data_acks_total{status=\"success\"} 1"));
+    assert_eq!(
+        metrics::counter_value(
+            metric_names::CONTROL_TOPICS_CREATED_TOTAL,
+            &[("status", "success")]
+        ),
+        1
+    );
+
+    drop(client);
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
 }

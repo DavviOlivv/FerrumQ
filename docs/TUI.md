@@ -5,15 +5,21 @@ HTTP control plane. Rust remains the source of broker behavior.
 
 ## Usage
 
-Start the HTTP control plane:
+Start the recommended local runtime:
 
 ```sh
-cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
+cargo run -p msg-runtime --bin brokerd -- serve-all \
+  --data-dir ./.ferrumq \
+  --http-listen 127.0.0.1:8080 \
+  --grpc-listen 127.0.0.1:9090
 ```
 
-The TUI reads from that HTTP process only. If a separate
-`brokerd serve-grpc` process uses the same `--data-dir`, the TUI does not show
-live gRPC-process changes until the HTTP process is stopped and restarted.
+The TUI reads from the HTTP control plane only. With `serve-all`, that HTTP
+control plane shares one in-process broker with the gRPC data plane, so manual
+refreshes show live gRPC-process mutations made through the same runtime.
+`brokerd serve` remains HTTP-only, and `brokerd serve-grpc` remains gRPC-only.
+If those split processes use the same `--data-dir`, the TUI does not show live
+gRPC-process changes until the HTTP process is stopped and restarted.
 
 Run the TUI:
 
@@ -121,7 +127,7 @@ The TUI is read-only. It does not publish, consume, ACK, NACK, retry messages,
 inspect lag, stream logs, fetch `/metrics`, call the gRPC data plane, start or
 supervise broker processes, or implement broker semantics.
 The configured gRPC URL is displayed for operator context only; it is not used
-for live data-plane inspection.
+for direct data-plane inspection.
 Public SDK workflows, auth/RBAC, TLS, rate limiting, observability
 dashboards/export, clustering, replication, exactly-once semantics, and
 MaaS/multi-tenancy remain deferred.

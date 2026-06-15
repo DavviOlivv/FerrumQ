@@ -5,20 +5,26 @@ TypeScript `ferrumq` CLI uses this API for control-plane commands only.
 `GET /metrics` is an operational Prometheus text endpoint for process-local
 counters.
 
-Start the server:
+Start the recommended local runtime:
 
 ```sh
-cargo run -p msg-runtime --bin brokerd -- serve --data-dir ./.ferrumq --listen 127.0.0.1:8080
+cargo run -p msg-runtime --bin brokerd -- serve-all \
+  --data-dir ./.ferrumq \
+  --http-listen 127.0.0.1:8080 \
+  --grpc-listen 127.0.0.1:9090
 ```
 
 This API is control-plane only. It manages and inspects the local durable broker
-state opened by this HTTP process at startup. It does not provide HTTP publish,
-consume, ACK, or NACK endpoints. The TypeScript CLI uses unary gRPC for those
-data-plane commands. If a separate `brokerd serve-grpc` process uses the same
-`--data-dir`, state persists across restarts, but this HTTP process does not
-live-reload gRPC-process changes while both are running. TypeScript TUI
-behavior, auth, TLS, rate limiting, observability export, clustering,
-replication, and exactly-once semantics are intentionally deferred.
+state opened by the runtime. It does not provide HTTP publish, consume, ACK, or
+NACK endpoints. The TypeScript CLI uses unary gRPC for those data-plane
+commands. `brokerd serve-all` is recommended for local coherent demos because
+the HTTP API and gRPC data plane share one process-local broker. `brokerd
+serve` remains an HTTP-only runtime; `brokerd serve-grpc` remains gRPC-only. If
+those split processes use the same `--data-dir`, state persists across restarts,
+but each process loads state at startup and does not live-reload peer-process
+changes. TypeScript TUI behavior, auth, TLS, rate limiting, observability
+export, clustering, replication, and exactly-once semantics are intentionally
+deferred.
 
 All JSON responses, including API-owned error responses, use `application/json`. Endpoints with JSON request bodies require `Content-Type: application/json`. `GET /metrics` is the exception: it returns Prometheus text, not JSON.
 
@@ -80,7 +86,7 @@ Response `200 OK`:
 ### `GET /metrics`
 
 Returns process-local Prometheus text exposition for counters recorded in this
-HTTP control-plane process.
+runtime process.
 
 Response `200 OK` content type:
 
@@ -97,9 +103,11 @@ full filesystem paths, backtraces, or debug dumps.
 Each successful scrape is counted once before rendering as
 `ferrumq_control_http_requests_total{method="GET",route="/metrics",status="200"}`.
 
-When HTTP and gRPC are run as separate `brokerd` processes, this endpoint
-reports only the HTTP process. Cross-process aggregation, dashboards,
-OpenTelemetry export, auth, TLS, and rate limiting for metrics are deferred.
+With `brokerd serve-all`, this endpoint includes counters from both the HTTP
+control plane and gRPC data plane because both adapters run in one process. When
+HTTP and gRPC are run as separate `brokerd` processes, this endpoint reports
+only the HTTP process. Cross-process aggregation, dashboards, OpenTelemetry
+export, auth, TLS, and rate limiting for metrics are deferred.
 
 ## Readiness
 

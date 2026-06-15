@@ -9,14 +9,15 @@ not a dashboard, not a collector pipeline, and not an authentication boundary.
 
 ## Logging
 
-`brokerd serve` and `brokerd serve-grpc` initialize tracing before opening
-runtime services.
+`brokerd serve-all`, `brokerd serve`, and `brokerd serve-grpc` initialize
+tracing before opening runtime services.
 
 Filtering uses `RUST_LOG`:
 
 ```sh
 RUST_LOG=info cargo run -p msg-runtime --bin brokerd -- serve
 RUST_LOG=msg_broker=debug,msg_storage=debug cargo run -p msg-runtime --bin brokerd -- serve-grpc
+RUST_LOG=info cargo run -p msg-runtime --bin brokerd -- serve-all
 ```
 
 Log formatting is selected with `FERRUMQ_LOG_FORMAT`:
@@ -24,22 +25,23 @@ Log formatting is selected with `FERRUMQ_LOG_FORMAT`:
 - unset or `compact`: compact text logs.
 - `json`: JSON logs.
 
-Any other value fails startup for `brokerd serve` and `brokerd serve-grpc`.
-Commands that do not initialize tracing, such as `brokerd --version`, are not
-affected by this environment variable.
+Any other value fails startup for `brokerd serve-all`, `brokerd serve`, and
+`brokerd serve-grpc`. Commands that do not initialize tracing, such as
+`brokerd --version`, are not affected by this environment variable.
 
 Examples:
 
 ```sh
 FERRUMQ_LOG_FORMAT=compact RUST_LOG=info brokerd serve
 FERRUMQ_LOG_FORMAT=json RUST_LOG=info brokerd serve-grpc
+FERRUMQ_LOG_FORMAT=json RUST_LOG=info brokerd serve-all
 ```
 
-Startup logs include only the operation and listen address. Broker and storage
-events use safe metadata fields such as operation, topic, partition, offset,
-message ID, delivery ID, consumer group, consumer ID, status, and sanitized
-error kind. Logs must not include message payloads, full filesystem paths,
-backtraces, or debug dumps.
+Startup logs include only the operation and listen address or addresses. Broker
+and storage events use safe metadata fields such as operation, topic,
+partition, offset, message ID, delivery ID, consumer group, consumer ID, status,
+and sanitized error kind. Logs must not include message payloads, full
+filesystem paths, backtraces, or debug dumps.
 
 ## Metrics Endpoint
 
@@ -63,7 +65,8 @@ curl http://127.0.0.1:8080/metrics
 
 The endpoint returns Prometheus text exposition for the current process only.
 It includes `# HELP` and `# TYPE` lines for known counters and sample lines for
-counters observed in that process.
+counters observed in that process. `brokerd serve-all` is the recommended local
+runtime when one `/metrics` scrape should include both HTTP and gRPC counters.
 
 Each successful scrape is counted as a normal HTTP request before rendering:
 
@@ -141,13 +144,14 @@ Storage counters:
 
 ## Limitations
 
-Metrics are process-local. If HTTP control and gRPC data-plane servers run as
-separate processes, `GET /metrics` on the HTTP process reports only the HTTP
-process counters. It does not prove that the HTTP process has live-reloaded
-broker state mutations made by a separate gRPC process. Rust in-process tests
-can inspect one registry because they run adapters in a single process. A
-separate data-plane metrics listener, remote scraping topology, and
-cross-process aggregation are deferred.
+Metrics are process-local. With `brokerd serve-all`, HTTP control and gRPC
+data-plane servers run in one process, so `GET /metrics` includes counters from
+HTTP topic creation and gRPC publish, consume, ACK, and NACK calls. With
+split-process `brokerd serve` and `brokerd serve-grpc`, `GET /metrics` on the
+HTTP process reports only HTTP-process counters. It does not prove that the
+HTTP process has live-reloaded broker state mutations made by a separate gRPC
+process. A separate data-plane metrics listener, remote scraping topology,
+cross-process aggregation, and cross-process live reload are deferred.
 
 Deferred observability scope includes Grafana dashboards, OpenTelemetry
 collector/export pipelines, hosted telemetry, auth/TLS/rate limiting for

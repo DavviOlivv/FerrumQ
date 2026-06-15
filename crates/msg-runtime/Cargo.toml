@@ -11,11 +11,15 @@ clap.workspace = true
 msg-control-api = { path = "../msg-control-api" }
 msg-data-plane = { path = "../msg-data-plane" }
 msg-observability = { path = "../msg-observability" }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { workspace = true, features = ["transport"] }
 tracing.workspace = true
 
 [dev-dependencies]
+msg-protocol = { path = "../msg-protocol" }
+serde_json = "1"
 tempfile = "3"
 
 [lib]

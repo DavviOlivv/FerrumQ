@@ -44,15 +44,24 @@ clients.
 
 `broker version` runs `brokerd --version`. If `brokerd` is not on `PATH`, the
 CLI reports a short expected error. Broker process supervision commands are not
-implemented; start `brokerd serve` and `brokerd serve-grpc` directly.
+implemented; start `brokerd serve-all` directly for local demos and
+development:
 
-Those runtime commands start separate local processes. Each process opens its
-own `DurableBroker` state at startup. A shared `--data-dir` persists state
-across restarts, but it does not provide live shared in-memory state or
-live-reload between running HTTP and gRPC processes. For local demos, create
-topics through `brokerd serve`, stop that process, then start
-`brokerd serve-grpc` against the same data directory for publish, consume, ACK,
-and NACK commands.
+```sh
+cargo run -p msg-runtime --bin brokerd -- serve-all \
+  --data-dir ./.ferrumq \
+  --http-listen 127.0.0.1:8080 \
+  --grpc-listen 127.0.0.1:9090
+```
+
+`serve-all` runs the HTTP control plane and gRPC data plane in one process, so
+CLI topic creation, publish, consume, ACK, NACK, status, DLQ, and metrics calls
+observe the same live process-local broker. `brokerd serve` remains HTTP-only,
+and `brokerd serve-grpc` remains gRPC-only. Those split runtime commands start
+separate local processes. Each process opens its own `DurableBroker` state at
+startup. A shared `--data-dir` persists state across restarts, but it does not
+provide live shared in-memory state, live reload between running processes, or
+shared metrics.
 
 Control-plane commands:
 
@@ -69,8 +78,9 @@ ferrumq dlq list --topic orders
 
 `GET /metrics` is available on the HTTP control plane as an operational
 Prometheus endpoint. The CLI does not wrap it as a command; use HTTP tooling
-such as `curl` when metrics text is needed. In the split-process setup, HTTP
-`/metrics` reports only HTTP-process counters, not gRPC counters.
+such as `curl` when metrics text is needed. With `serve-all`, HTTP `/metrics`
+includes the gRPC counters recorded in the same process. In the split-process
+setup, HTTP `/metrics` reports only HTTP-process counters, not gRPC counters.
 
 Data-plane commands:
 
@@ -138,6 +148,7 @@ auth/RBAC, TLS, streaming consume, rate limiting, metrics commands,
 observability dashboards/export, clustering, replication, exactly-once
 semantics, and MaaS/multi-tenancy remain deferred. TypeScript process-level
 gRPC integration tests are also deferred because
-`brokerd serve-grpc --listen 127.0.0.1:0` does not expose the selected port;
-the project relies on Rust in-process gRPC tests and mocked TypeScript client
-seams for that boundary.
+`brokerd serve-grpc --listen 127.0.0.1:0` and
+`brokerd serve-all --grpc-listen 127.0.0.1:0` do not expose the selected port;
+the project relies on Rust in-process gRPC tests, the Rust unified-runtime
+socket test, and mocked TypeScript client seams for that boundary.

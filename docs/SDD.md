@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`. Milestone 7 adds the first usable TypeScript CLI as an adapter over those Rust-owned APIs. Milestone 8 adds the first read-only TypeScript TUI over the HTTP control plane. Milestone 9 adds structured tracing and process-local Prometheus metrics.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`. Milestone 7 adds the first usable TypeScript CLI as an adapter over those Rust-owned APIs. Milestone 8 adds the first read-only TypeScript TUI over the HTTP control plane. Milestone 9 adds structured tracing and process-local Prometheus metrics. Milestone 11 adds `brokerd serve-all`, a unified single-process local runtime for coherent HTTP, gRPC, status, DLQ, and metrics demos.
 
 ## 1. Product Vision
 
@@ -26,6 +26,7 @@ The planned product scope includes topics, partitions, publish/consume flows, AC
 - No TypeScript broker process supervision, public SDK surface, streaming consume, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, or exactly-once semantics in Milestone 7.
 - No TUI publish, consume, ACK, NACK, broker process supervision, data-plane gRPC calls, streaming consume, auth/RBAC, TLS, rate limiting, clustering, replication, consensus, MaaS/multi-tenancy, idempotency-key enforcement, or exactly-once semantics in Milestone 8.
 - No dashboards, OpenTelemetry collector/export pipeline, hosted telemetry, auth/TLS/rate limiting for metrics, advanced TUI observability panels, clustering/replication metrics, exactly-once telemetry, or MaaS/multi-tenancy telemetry in Milestone 9.
+- No cross-process live reload, distributed locking, cluster mode, replication, shared metrics aggregation across processes, auth/TLS/rate limiting, web dashboard, OpenTelemetry collector, MaaS/SaaS telemetry, or exactly-once delivery in Milestone 11.
 - No HTTP/gRPC control or data plane adapters in Milestone 2.
 - No retry scheduling workers or DLQ persistence in Milestone 2.
 
@@ -108,6 +109,8 @@ The control plane manages topics, partition inspection, consumer group inspectio
 
 `brokerd serve --data-dir ./.ferrumq --listen 127.0.0.1:8080` opens the local durable broker and serves the control router. The Milestone 5 API is control-plane only: it exposes health, readiness, broker status, topic creation/listing/lookup, and DLQ inspection. It does not expose data-plane publish, consume, ACK, or NACK behavior over HTTP. Duplicate topic creation returns `409 TOPIC_ALREADY_EXISTS`; valid but unknown topic lookups return `404 TOPIC_NOT_FOUND`; malformed JSON and wrong request shapes return `400 INVALID_REQUEST`; domain validation failures return `400 VALIDATION_ERROR`; unavailable broker state returns `503 BROKER_UNAVAILABLE`; internal broker/storage failures return sanitized `500 INTERNAL_ERROR`. Unsupported routes and methods also use the JSON envelope.
 
+For local coherent demos and development, `brokerd serve-all --data-dir ./.ferrumq --http-listen 127.0.0.1:8080 --grpc-listen 127.0.0.1:9090` is recommended over HTTP-only `serve`. In `serve-all`, this HTTP control plane is backed by the same process-local broker instance as the gRPC data plane.
+
 ## 19. Data Plane
 
 The data plane handles publish, consume, ACK, and NACK. Milestone 6 implements the first data-plane adapter in `msg-data-plane` using tonic/prost and protobuf contracts generated from `crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto`.
@@ -120,6 +123,16 @@ The data plane handles publish, consume, ACK, and NACK. Milestone 6 implements t
 - `Nack(NackRequest) -> NackResponse`.
 
 `msg-data-plane` owns explicit protobuf-to-domain mapping, keeps `DurableBroker` behind `Arc<Mutex<_>>`, calls public broker APIs only, and returns sanitized gRPC statuses. Delivery is local durable at-least-once; consumers must be idempotent. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and unknown, duplicate, or stale deliveries map to `NOT_FOUND`; wrong delivery ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if encountered; poisoned broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected broker failures map to `INTERNAL`.
+
+For local coherent demos and development, the same gRPC service is served by `brokerd serve-all` alongside the HTTP control plane. The older `brokerd serve-grpc` command remains a gRPC-only split-process runtime.
+
+## 19.1. Runtime Modes
+
+`brokerd serve-all` opens durable state once through `msg-control-api::open_state`, builds the HTTP router from that `AppState`, and builds `DataPlaneService::from_shared(state.broker())` for gRPC. The ownership model is the existing `Arc<Mutex<DurableBroker>>`; `DurableBroker` remains synchronous and local-filesystem backed.
+
+`serve-all` is the recommended local demo and development runtime because HTTP topic creation, gRPC publish/consume/ACK/NACK, HTTP status/DLQ, and HTTP `/metrics` observe one live process-local broker and metrics registry. It does not change storage format, protobuf messages, public HTTP/gRPC error shapes, retry semantics, or delivery guarantees.
+
+`brokerd serve` remains HTTP-only. `brokerd serve-grpc` remains gRPC-only. In that split-process mode, each process loads durable state at startup, does not live-reload peer process mutations, and has process-local metrics. A shared `--data-dir` persists state across restarts but does not provide live shared in-memory state. Cross-process live reload, distributed locking, shared metrics aggregation, replication, cluster mode, auth/TLS/rate limiting, dashboards, OpenTelemetry collector integration, hosted telemetry, MaaS/SaaS telemetry, and exactly-once delivery remain deferred.
 
 ## 20. TypeScript CLI
 
@@ -176,7 +189,7 @@ last successful snapshot visible.
 
 Milestone 9 implements a focused local observability foundation.
 
-`brokerd serve` and `brokerd serve-grpc` initialize `tracing` from `RUST_LOG`.
+`brokerd serve-all`, `brokerd serve`, and `brokerd serve-grpc` initialize `tracing` from `RUST_LOG`.
 `FERRUMQ_LOG_FORMAT=json` selects JSON logs; unset or `compact` uses compact
 text. Other values fail startup for commands that initialize tracing; commands
 such as `brokerd --version` do not initialize tracing. Startup logs include
@@ -198,10 +211,11 @@ Each successful `/metrics` scrape is counted once as
 `ferrumq_control_http_requests_total{method="GET",route="/metrics",status="200"}`
 before rendering.
 
-Metrics are process-local. If HTTP and gRPC run as separate processes,
-`GET /metrics` on the HTTP process reports only the HTTP process. Data-plane
-metrics aggregation, dashboards, OpenTelemetry export, hosted telemetry, and
-advanced TUI observability panels remain deferred.
+Metrics are process-local. With `brokerd serve-all`, `GET /metrics` reports the
+single process that contains both HTTP and gRPC adapters. If HTTP and gRPC run
+as separate processes, `GET /metrics` on the HTTP process reports only the HTTP
+process. Data-plane metrics aggregation, dashboards, OpenTelemetry export,
+hosted telemetry, and advanced TUI observability panels remain deferred.
 
 ## 23. Security Assumptions
 
@@ -209,7 +223,7 @@ Early milestones assume local development. Authentication, authorization, multi-
 
 ## 24. Testing Strategy Summary
 
-The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Milestone 6 adds protocol generation/exposure tests, in-process tonic service tests for publish/consume/ACK/NACK and durability, and runtime smoke tests for `serve-grpc`. Milestone 7 adds Vitest coverage for CLI parsing, config precedence, validation, JSON output, HTTP success/error handling, network failures, mocked gRPC data-plane commands, gRPC status formatting, and built CLI smoke tests. Milestone 8 adds Vitest coverage for the shared HTTP control client, TUI config precedence, loader success/failures, Ink rendering, keyboard interactions, and built TUI help/version smoke tests. Milestone 9 adds observability crate tests for Prometheus rendering, escaping, label policy, and payload absence; control API metrics endpoint tests; data-plane counter tests; and focused broker/storage metric coverage. Later milestones add E2E tests, broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
+The harness starts with compile checks, unit tests, TypeScript tests, linting, formatting, and CI. Milestone 1 adds focused Rust unit tests and property tests for core domain invariants. Milestone 2 adds `msg-broker` integration-style Rust tests for topic creation, publish, consume, ACK, NACK, retry, lease expiry, DLQ, offset uniqueness, and no-redelivery invariants. Milestone 3 adds `msg-storage` filesystem integration tests for append/read behavior, segment rolling, reopen recovery, truncation repair, checksum repair for the final trailing frame, and corruption errors. Milestone 4 adds `DurableBroker` reopen, duplicate/stale operation, retry/DLQ, partition/offset, corruption, and persistence-boundary tests for the local durable contract. Milestone 5 adds Tower/Axum router integration tests for health, readiness, topic admin, deterministic listing, persistence, status, DLQ inspection, malformed JSON, and stable error envelopes. Milestone 6 adds protocol generation/exposure tests, in-process tonic service tests for publish/consume/ACK/NACK and durability, and runtime smoke tests for `serve-grpc`. Milestone 7 adds Vitest coverage for CLI parsing, config precedence, validation, JSON output, HTTP success/error handling, network failures, mocked gRPC data-plane commands, gRPC status formatting, and built CLI smoke tests. Milestone 8 adds Vitest coverage for the shared HTTP control client, TUI config precedence, loader success/failures, Ink rendering, keyboard interactions, and built TUI help/version smoke tests. Milestone 9 adds observability crate tests for Prometheus rendering, escaping, label policy, and payload absence; control API metrics endpoint tests; data-plane counter tests; and focused broker/storage metric coverage. Milestone 11 adds runtime tests for `serve-all` help, invalid arguments, bind failures, tracing-format behavior, and a real ephemeral-listener HTTP+gRPC integration flow that verifies shared state and combined process-local metrics. Later milestones add broader property tests, concurrency tests, crash/recovery tests, fuzzing, and benchmarks.
 
 ## 25. Milestone Roadmap
 
