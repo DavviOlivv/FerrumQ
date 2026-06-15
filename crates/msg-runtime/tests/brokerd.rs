@@ -1,8 +1,16 @@
-use std::{net::SocketAddr, process::Command, sync::OnceLock};
+use std::{
+    io::ErrorKind,
+    net::SocketAddr,
+    process::{Command, Output, Stdio},
+    sync::OnceLock,
+    thread,
+    time::{Duration, Instant},
+};
 
 use msg_observability::{metric_names, metrics};
 use msg_protocol::ferrumq::dataplane::v1::{
-    AckRequest, ConsumeRequest, PublishRequest, ferrum_q_data_plane_client::FerrumQDataPlaneClient,
+    AckRequest, ConsumeRequest, NackRequest, PublishRequest,
+    ferrum_q_data_plane_client::FerrumQDataPlaneClient,
 };
 use serde_json::{Value, json};
 use tempfile::{NamedTempFile, TempDir};
@@ -91,6 +99,37 @@ fn parse_http_response(response: &[u8]) -> (u16, String) {
 
 fn reserve_port() -> std::net::TcpListener {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+}
+
+fn loopback_bind_available() -> bool {
+    match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => {
+            drop(listener);
+            true
+        }
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => false,
+        Err(error) => panic!("failed to check loopback bind availability: {error}"),
+    }
+}
+
+fn output_with_timeout(mut command: Command, timeout: Duration) -> Output {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("command did not exit within {timeout:?}");
+        }
+
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -318,6 +357,10 @@ fn serve_grpc_invalid_data_dir_file_fails_cleanly() {
 
 #[test]
 fn serve_all_invalid_data_dir_file_fails_cleanly() {
+    if !loopback_bind_available() {
+        return;
+    }
+
     let data_dir = NamedTempFile::new().unwrap();
     let output = brokerd()
         .args(["serve-all", "--data-dir"])
@@ -339,15 +382,19 @@ fn serve_all_invalid_data_dir_file_fails_cleanly() {
 
 #[test]
 fn serve_all_http_bind_failure_fails_cleanly() {
+    if !loopback_bind_available() {
+        return;
+    }
+
     let data_dir = TempDir::new().unwrap();
     let reserved = reserve_port();
     let addr = reserved.local_addr().unwrap().to_string();
-    let output = brokerd()
+    let mut command = brokerd();
+    command
         .args(["serve-all", "--data-dir"])
         .arg(data_dir.path())
-        .args(["--http-listen", &addr, "--grpc-listen", "127.0.0.1:0"])
-        .output()
-        .unwrap();
+        .args(["--http-listen", &addr, "--grpc-listen", "127.0.0.1:0"]);
+    let output = output_with_timeout(command, Duration::from_secs(5));
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -357,15 +404,19 @@ fn serve_all_http_bind_failure_fails_cleanly() {
 
 #[test]
 fn serve_all_grpc_bind_failure_fails_cleanly() {
+    if !loopback_bind_available() {
+        return;
+    }
+
     let data_dir = TempDir::new().unwrap();
     let reserved = reserve_port();
     let addr = reserved.local_addr().unwrap().to_string();
-    let output = brokerd()
+    let mut command = brokerd();
+    command
         .args(["serve-all", "--data-dir"])
         .arg(data_dir.path())
-        .args(["--http-listen", "127.0.0.1:0", "--grpc-listen", &addr])
-        .output()
-        .unwrap();
+        .args(["--http-listen", "127.0.0.1:0", "--grpc-listen", &addr]);
+    let output = output_with_timeout(command, Duration::from_secs(5));
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -375,6 +426,10 @@ fn serve_all_grpc_bind_failure_fails_cleanly() {
 
 #[tokio::test]
 async fn serve_all_shares_http_grpc_state_and_metrics() {
+    if !loopback_bind_available() {
+        return;
+    }
+
     let _guard = metrics_test_guard().await;
     metrics::reset_for_tests();
     let data_dir = TempDir::new().unwrap();
@@ -444,12 +499,82 @@ async fn serve_all_shares_http_grpc_state_and_metrics() {
     assert_eq!(status_body["topics"], 1);
     assert_eq!(status_body["dlqEntries"], 0);
 
+    client.publish(publish_request("message-2")).await.unwrap();
+    let first_attempt = client
+        .consume(consume_request(20))
+        .await
+        .unwrap()
+        .into_inner()
+        .messages;
+    assert_eq!(first_attempt.len(), 1);
+    assert_eq!(first_attempt[0].message_id, "message-2");
+    client
+        .nack(NackRequest {
+            delivery_id: first_attempt[0].delivery_id.clone(),
+            consumer_id: "consumer-1".to_owned(),
+            reason: "transient".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let second_attempt = client
+        .consume(consume_request(4_000_000_000_000))
+        .await
+        .unwrap()
+        .into_inner()
+        .messages;
+    assert_eq!(second_attempt.len(), 1);
+    assert_eq!(second_attempt[0].message_id, "message-2");
+    assert_eq!(second_attempt[0].attempt_number, 2);
+    client
+        .nack(NackRequest {
+            delivery_id: second_attempt[0].delivery_id.clone(),
+            consumer_id: "consumer-1".to_owned(),
+            reason: "still failing".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let third_attempt = client
+        .consume(consume_request(4_000_000_010_000))
+        .await
+        .unwrap()
+        .into_inner()
+        .messages;
+    assert_eq!(third_attempt.len(), 1);
+    assert_eq!(third_attempt[0].message_id, "message-2");
+    assert_eq!(third_attempt[0].attempt_number, 3);
+    client
+        .nack(NackRequest {
+            delivery_id: third_attempt[0].delivery_id.clone(),
+            consumer_id: "consumer-1".to_owned(),
+            reason: "poison".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let (status, body) = http_json(http_addr, "GET", "/v1/dlq", None).await;
+    assert_eq!(status, 200);
+    let dlq_body = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(dlq_body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(dlq_body["items"][0]["messageId"], "message-2");
+    assert_eq!(dlq_body["items"][0]["reason"], "poison");
+    assert_eq!(dlq_body["items"][0]["attemptCount"], 3);
+
+    let (status, body) = http_json(http_addr, "GET", "/v1/status", None).await;
+    assert_eq!(status, 200);
+    let status_body = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(status_body["topics"], 1);
+    assert_eq!(status_body["dlqEntries"], 1);
+
     let (status, metrics_body) = http_json(http_addr, "GET", "/metrics", None).await;
     assert_eq!(status, 200);
     assert!(metrics_body.contains("ferrumq_control_topics_created_total{status=\"success\"} 1"));
-    assert!(metrics_body.contains("ferrumq_data_publishes_total{status=\"success\"} 1"));
-    assert!(metrics_body.contains("ferrumq_data_consumes_total{status=\"success\"} 1"));
+    assert!(metrics_body.contains("ferrumq_data_publishes_total{status=\"success\"} 2"));
+    assert!(metrics_body.contains("ferrumq_data_consumes_total{status=\"success\"} 4"));
     assert!(metrics_body.contains("ferrumq_data_acks_total{status=\"success\"} 1"));
+    assert!(metrics_body.contains("ferrumq_data_nacks_total{status=\"success\"} 3"));
+    assert!(metrics_body.contains("ferrumq_broker_dlq_transitions_total{kind=\"nack\"} 1"));
     assert_eq!(
         metrics::counter_value(
             metric_names::CONTROL_TOPICS_CREATED_TOTAL,

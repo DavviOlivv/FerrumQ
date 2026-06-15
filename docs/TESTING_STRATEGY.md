@@ -32,11 +32,12 @@ repair counters without fixed ports or sleeps.
 
 Milestone 11 runtime integration tests start the unified local runtime on
 pre-bound ephemeral HTTP and gRPC listeners. They create a topic through real
-HTTP, publish/consume/ACK through real gRPC, fetch HTTP status, scrape
-`/metrics`, and assert that topic creation plus gRPC publish, consume, and ACK
-counters are present in one process-local registry. Runtime CLI tests also
-cover `serve-all --help`, invalid HTTP and gRPC listen addresses, invalid data
-directories, invalid tracing format behavior, and HTTP/gRPC bind failures.
+HTTP, publish/consume/ACK/NACK through real gRPC, fetch HTTP status and DLQ
+state, scrape `/metrics`, and assert that topic creation plus gRPC publish,
+consume, ACK, NACK, and DLQ counters are present in one process-local registry.
+Runtime CLI tests also cover `serve-all --help`, invalid HTTP and gRPC listen
+addresses, invalid data directories, invalid tracing format behavior, and
+HTTP/gRPC bind failures.
 
 ## End-to-End Tests
 

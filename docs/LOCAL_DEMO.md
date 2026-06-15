@@ -60,11 +60,17 @@ The consume output includes a delivery ID. ACK it:
 node packages/cli/dist/cli.js ack <delivery-id> --consumer-id worker-1
 ```
 
-To see NACK and DLQ inspection, publish and consume another message, then NACK
-the returned delivery ID:
+To see NACK and DLQ inspection, publish another message and NACK each returned
+delivery ID until the default retry policy moves it to the DLQ:
 
 ```sh
 node packages/cli/dist/cli.js publish orders --data '{"orderId":2,"status":"reject"}'
+node packages/cli/dist/cli.js consume orders --group workers --consumer-id worker-1 --max 1
+node packages/cli/dist/cli.js nack <delivery-id> --consumer-id worker-1 --reason poison
+sleep 1
+node packages/cli/dist/cli.js consume orders --group workers --consumer-id worker-1 --max 1
+node packages/cli/dist/cli.js nack <delivery-id> --consumer-id worker-1 --reason poison
+sleep 1
 node packages/cli/dist/cli.js consume orders --group workers --consumer-id worker-1 --max 1
 node packages/cli/dist/cli.js nack <delivery-id> --consumer-id worker-1 --reason poison
 node packages/cli/dist/cli.js dlq list --topic orders
