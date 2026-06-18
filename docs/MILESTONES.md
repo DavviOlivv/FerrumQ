@@ -389,3 +389,66 @@ Deferred from Milestone 12:
 - Cluster and replication.
 - Exactly-once delivery.
 - `idempotency_key` enforcement for publish deduplication.
+
+## Milestone 13: Multi-Terminal Chat Example
+
+- Terminal chat application using `@ferrumq/sdk`.
+- Multi-client integration test against `brokerd serve-all`.
+- Room-per-topic mapping with independent consumer groups per session.
+- Session-local deduplication and ACK policy.
+- Bounded unary polling with backoff and cancellation.
+- Ink/React terminal UI with message display, input, and status.
+- CLI with `--name`, `--room`, `--http-url`, `--grpc-url` options.
+- Sanitized terminal rendering against ANSI escape and control characters.
+- Documentation and ADR for broadcast emulation through consumer groups.
+
+Status: implemented as `@ferrumq/chat` in `packages/chat`.
+
+Implemented scope:
+
+- `ChatApp` application service with join, publish, poll, ACK, and graceful
+  shutdown over the public `@ferrumq/sdk` API.
+- `ChatUi` Ink/React terminal component with scrollable message display,
+  text input, multi-key quit, status indicator, and bounded message history.
+- `ChatMessageV1` versioned JSON envelope with sender identity, room,
+  session, text, and UTC timestamp fields, validated at the application
+  boundary with control-character and ANSI sanitization.
+- Room-to-topic mapping (`room "general"` → `chat.general`) with single
+  partition for ordered chat display.
+- Independent consumer group per participant session to emulate broadcast
+  delivery without native broker fan-out.
+- Session-local LRU deduplication cache keyed by application message ID.
+- ACK for valid and malformed messages (no NACK loops).
+- Self-messages received back from broker for confirmed display.
+- Bounded polling with configurable interval and exponential backoff on
+  transient errors, with AbortController-based cancellation.
+- CLI parsing with `--name`, `--room`, `--http-url`, `--grpc-url`,
+  `--timeout-ms`, `--poll-interval-ms` and environment variable overrides.
+- Unit tests for domain validation, message parsing, sanitization,
+  deduplication, identity generation, and application lifecycle.
+- Terminal UI tests with mocked SDK for initial render, header, empty state,
+  and prompts.
+- Real multi-client integration test: spawns `brokerd serve-all` with
+  ephemeral ports, creates two independent SDK clients in the same room,
+  verifies both receive each other's messages, ACKs deliveries, and confirms
+  no redelivery after ACK.
+- Documentation in [CHAT.md](CHAT.md) and ADR
+  [0016](ADR/0016-chat-broadcast-emulation.md).
+- README, LOCAL_DEMO, ARCHITECTURE, TESTING_STRATEGY, and MILESTONES updates.
+
+Deferred from Milestone 13:
+
+- Native broker fan-out subscriptions and consumer-group redesign.
+- Streaming gRPC consume.
+- WebSockets.
+- Presence protocol and typing indicators.
+- Private messages and moderation.
+- Message editing, deletion, and full-text search.
+- History replay control (`--history`, `--from` flags).
+- Non-interactive send/receive CLI commands.
+- Authentication, authorization, TLS, and encryption.
+- Web UI.
+- File upload and blob storage.
+- PostgreSQL history and search.
+- Cluster mode and replication.
+- Exactly-once delivery.

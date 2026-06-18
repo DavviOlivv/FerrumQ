@@ -38,6 +38,11 @@ Milestone 7 adds the first TypeScript CLI foundation without creating a TypeScri
 
 Milestone 8 adds the first TypeScript TUI foundation under the same boundary. `@ferrumq/tui` renders an Ink dashboard from the HTTP control plane through the shared `@ferrumq/protocol` control-plane client. It is read-only, keeps the gRPC URL as configured display state only, and does not publish, consume, ACK, NACK, supervise processes, or call the data plane.
 
+Milestone 13 adds the first user-facing application (`@ferrumq/chat`), a
+multi-terminal chat built entirely on the public SDK. Each participant uses an
+independent consumer group to emulate broadcast delivery, and the Ink/React
+terminal UI exercises the full HTTP/gRPC stack. See [CHAT.md](CHAT.md).
+
 Milestone 12 adds the TypeScript SDK (`@ferrumq/sdk`) as a reusable typed client
 that wraps the HTTP control plane and gRPC data plane into a single coherent API.
 It reuses `@ferrumq/protocol` for transport and protocol-level contracts while

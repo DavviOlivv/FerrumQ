@@ -1,0 +1,55 @@
+export {
+  ChatApp,
+  type ChatAppDeps,
+  type ChatAppOptions,
+  type ChatState,
+} from "./app.js";
+export {
+  type ChatConfig,
+  type ChatEnvironment,
+  parseChatArgs,
+} from "./config.js";
+export {
+  buildChatMessage,
+  CHAT_MESSAGE_TYPE,
+  CHAT_MESSAGE_VERSION,
+  type ChatMessageV1,
+  type ChatSender,
+  DeduplicationCache,
+  type DisplayMessage,
+  DomainError,
+  generateMessageId,
+  generateParticipantId,
+  generateSessionId,
+  MAX_MESSAGE_LENGTH,
+  MAX_NAME_LENGTH,
+  MAX_ROOM_LENGTH,
+  type MalformedMessage,
+  makeConsumerGroup,
+  makeConsumerId,
+  makeTopicName,
+  NAME_PATTERN,
+  type ParticipantIdentity,
+  parseChatMessage,
+  ROOM_PATTERN,
+  sanitizeControlChars,
+  sanitizeDisplay,
+  stripAnsiEscapeSequences,
+  TOPIC_PREFIX,
+  toDisplayMessage,
+  validateName,
+  validateRoom,
+  validateText,
+} from "./domain.js";
+export {
+  type ChatRenderer,
+  type RunnerEnvironment,
+  type RunnerOutput,
+  type RunnerRuntime,
+  runChatCli,
+} from "./runner.js";
+export {
+  ChatUi,
+  type ChatUiConfig,
+  type ChatUiProps,
+} from "./ui.js";

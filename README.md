@@ -35,6 +35,7 @@ systems work:
 - `packages/tui`: `ferrumq-tui`, a read-only Ink dashboard over HTTP.
 - `packages/sdk`: `@ferrumq/sdk`, typed TypeScript client for the HTTP control
   plane and unary gRPC data plane with payload encoding and error handling.
+- `packages/chat`: `@ferrumq/chat`, multi-terminal chat example built on the SDK.
 
 The design is a modular monolith with hexagonal boundaries. Broker behavior
 stays in Rust; TypeScript packages are adapters or client-side helpers.
@@ -126,6 +127,20 @@ peer process mutations, and has its own process-local metrics. `serve-all`
 solves live state and metrics coherence only inside one process; cross-process
 reload, locking, and metrics aggregation remain deferred.
 
+Start a multi-terminal chat demo:
+
+```sh
+node packages/chat/dist/cli.js --name davi --room general
+```
+
+In another terminal:
+
+```sh
+node packages/chat/dist/cli.js --name alice --room general
+```
+
+See [docs/CHAT.md](docs/CHAT.md) for the full chat documentation.
+
 For a fuller walkthrough, see [docs/LOCAL_DEMO.md](docs/LOCAL_DEMO.md).
 
 ## Validation
@@ -179,6 +194,7 @@ docs/                Architecture, protocol, operation, release, and API docs
 - [Storage Format](docs/STORAGE_FORMAT.md)
 - [Broker State Format](docs/BROKER_STATE_FORMAT.md)
 - [Testing Strategy](docs/TESTING_STRATEGY.md)
+- [Chat Example](docs/CHAT.md)
 - [Local Demo](docs/LOCAL_DEMO.md)
 - [Release Checklist](docs/RELEASE_CHECKLIST.md)
 - [Milestones](docs/MILESTONES.md)

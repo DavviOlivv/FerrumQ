@@ -126,6 +126,25 @@ set `FERRUMQ_EXAMPLE_TOPIC` to choose a fixed name. Run
 `pnpm run examples:typecheck` to verify all example sources without executing
 them.
 
+## Chat
+
+Start a multi-terminal chat demo over the running broker:
+
+```sh
+node packages/chat/dist/cli.js --name davi --room general
+```
+
+In multiple other terminals:
+
+```sh
+node packages/chat/dist/cli.js --name alice --room general
+node packages/chat/dist/cli.js --name bob --room general
+```
+
+Each participant sees messages from all others. Press Enter to send, Esc to
+quit. See [docs/CHAT.md](CHAT.md) for the full chat documentation including
+architecture, message envelope, delivery semantics, and limitations.
+
 ## Split-Process Compatibility
 
 `brokerd serve` and `brokerd serve-grpc` remain valid, but they are intentionally

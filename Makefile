@@ -63,6 +63,7 @@ smoke:
 	node packages/cli/dist/cli.js publish --help
 	node packages/tui/dist/cli.js --version
 	node packages/tui/dist/cli.js --help
+	node packages/chat/dist/cli.js --help
 	cargo run -p msg-runtime --bin brokerd -- --version
 
 hygiene:
@@ -87,5 +88,6 @@ ci:
 	node packages/cli/dist/cli.js publish --help
 	node packages/tui/dist/cli.js --version
 	node packages/tui/dist/cli.js --help
+	node packages/chat/dist/cli.js --help
 	cargo run -p msg-runtime --bin brokerd -- --version
 	git diff --check

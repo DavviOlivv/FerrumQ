@@ -84,6 +84,20 @@ publish, unary consume, ACK, status, metrics, and cleanup. Only explicit
 loopback permission failures are skipped; startup and correctness failures
 remain test failures.
 
+Milestone 13 chat tests include domain unit tests (room/name/text validation,
+message encoding/decoding, ANSI and control character sanitization,
+deduplication, identity generation, topic and consumer group naming),
+application unit tests with mocked SDK (startup/connect/disconnect/stop
+lifecycle, topic-already-exists handling, connection failure, no publish after
+stop, per-session unique consumer groups), terminal UI tests with
+`ink-testing-library` (initial render, header, empty state, prompts), and a
+real multi-client integration test. The integration test starts
+`brokerd serve-all` on ephemeral ports with a temporary data directory, creates
+two independent SDK clients in the same chat room, verifies bidirectional
+message delivery through independent consumer groups, ACKs deliveries, and
+confirms no redelivery after ACK. No fixed ports, arbitrary sleeps, or
+committed state.
+
 ## CI Gates
 
 The local and CI release gate is `make ci`, which runs:
@@ -107,6 +121,7 @@ The local and CI release gate is `make ci`, which runs:
 - `node packages/cli/dist/cli.js publish --help`.
 - `node packages/tui/dist/cli.js --version`.
 - `node packages/tui/dist/cli.js --help`.
+- `node packages/chat/dist/cli.js --help`.
 - `cargo run -p msg-runtime --bin brokerd -- --version`.
 - `git diff --check`.
 
