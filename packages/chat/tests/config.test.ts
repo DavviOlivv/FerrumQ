@@ -78,6 +78,116 @@ describe("numeric CLI options", () => {
   });
 });
 
+describe("duplicate flag rejection", () => {
+  it("rejects duplicate --name flags", () => {
+    const result = parseChatArgs([
+      "--name",
+      "Alice",
+      "--name",
+      "Bob",
+      "--room",
+      "general",
+    ]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("duplicate");
+      expect(result.error).toContain("--name");
+    }
+  });
+
+  it("rejects duplicate --room flags", () => {
+    const result = parseChatArgs([
+      "--name",
+      "Alice",
+      "--room",
+      "a",
+      "--room",
+      "b",
+    ]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("duplicate");
+    }
+  });
+
+  it("rejects duplicate equals-form flags", () => {
+    const result = parseChatArgs([
+      "--name",
+      "Alice",
+      "--room",
+      "a",
+      "--timeout-ms=5000",
+      "--timeout-ms=10000",
+    ]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("duplicate");
+    }
+  });
+
+  it("rejects duplicate flag when mixing spaced and equals forms", () => {
+    const result = parseChatArgs([
+      "--name=Alice",
+      "--name",
+      "Bob",
+      "--room",
+      "general",
+    ]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("duplicate");
+    }
+  });
+
+  it("rejects duplicate numeric options", () => {
+    const result = parseChatArgs([
+      "--name",
+      "Alice",
+      "--room",
+      "general",
+      "--poll-interval-ms",
+      "100",
+      "--poll-interval-ms=200",
+    ]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("duplicate");
+    }
+  });
+});
+
+describe("equals-form value edge cases", () => {
+  it("strips a leading equals from equals-form values", () => {
+    const result = parseChatArgs(["--name==foo", "--room", "general"]);
+    expect("config" in result).toBe(true);
+    if ("config" in result) {
+      expect(result.config.name).toBe("foo");
+    }
+  });
+
+  it("handles equals-form with empty value as empty string", () => {
+    const result = parseChatArgs(["--name=", "--room=general"]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("--name is required");
+    }
+  });
+
+  it("handles equals-form URL with leading equals after ==", () => {
+    const result = parseChatArgs([
+      "--name",
+      "Alice",
+      "--room",
+      "general",
+      "--http-url==http://example.com",
+    ]);
+    expect("config" in result).toBe(true);
+    if ("config" in result) {
+      expect(result.config.httpUrl).toBe("http://example.com");
+    }
+  });
+});
+
 describe("URL configuration precedence", () => {
   it.each([
     {

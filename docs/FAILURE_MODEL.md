@@ -50,3 +50,31 @@ Backpressure should activate when memory, storage, partition depth, or consumer 
 ## Graceful Shutdown
 
 Future graceful shutdown should stop accepting new work, flush accepted writes according to durability policy, allow in-flight delivery handling within a timeout, and expose shutdown progress through structured logs.
+
+## Chat Application Failure Behavior
+
+The `@ferrumq/chat` application handles failures at the application layer on top of the public SDK:
+
+### Broker Unavailable at Startup
+
+If the broker cannot be reached during `start()` (health check, readiness, or topic creation fails), the `ChatApp` transitions to `error` state, closes the SDK client, and does not start polling. No background retry loop runs. The user must restart the chat.
+
+### Broker Outage During Operation
+
+When consume fails with a transport error (HTTP or gRPC), exponential backoff is applied and a warning is displayed. Repeated identical outage warnings are coalesced — only the first warning is emitted. When a subsequent consume succeeds, the warning is cleared. Backoff caps at `max(30_000, pollIntervalMs)` ms.
+
+Shutdown during backoff is immediate: pending timer is cleared, AbortController is signaled, and the SDK client is closed.
+
+Publish failures are not retried — an error is displayed and unsent input is preserved in the buffer. The user may retry manually.
+
+### Permanent Errors
+
+Errors with transport `sdk` (configuration, serialization, invalid response) are treated like transport errors for backoff purposes to prevent busy loops, but emit an error message rather than a warning.
+
+### Transparent Reconnection
+
+The chat does **not** transparently reconnect after a broker restart. If the broker restarts while clients are open, the consumer-group state may be out of sync. Users must restart the chat.
+
+### Malformed Messages
+
+Messages that fail parsing or validation are ACKed (not NACKed) and a concise warning is emitted. This prevents infinite redelivery loops. Malformed messages never enter the deduplication cache and never appear as React keys.

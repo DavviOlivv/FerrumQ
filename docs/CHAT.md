@@ -150,6 +150,14 @@ participant uses its own consumer group. This means:
 - There is no presence protocol — participants cannot see who is online.
 - History visibility on join is a known limitation. A `--history` flag or
   cursor fast-forward mechanism is not implemented in this version.
+- Every chat session creates a **durable consumer group** that persists across
+  broker restarts. Repeated connections accumulate durable consumer-group
+  state. There is no consumer-group deletion, retention, or cleanup mechanism.
+  This is not an issue for local demos and manual testing with a handful of
+  sessions, but would need broker-side lifecycle management for production use.
+- Transparent reconnection after broker restart is **not** supported. If the
+  broker restarts while a chat client is open, the client's consumer-group
+  state may be out of sync and the user should restart the chat.
 
 ## Message Envelope
 
@@ -225,26 +233,45 @@ polling:
 
 All external input is sanitized:
 
-- ANSI escape sequences are stripped from sender names and message text.
-- The complete C0 range (U+0000–U+001F), U+007F, and the complete C1 range
-  (U+0080–U+009F) are stripped.
+- ANSI CSI sequences (`ESC[`) and OSC sequences (`ESC]...BEL`/`ESC]...ST`)
+  are stripped from all received fields.
+- The complete C0 range (U+0000–U+001F), U+007F (DEL), and the complete C1
+  range (U+0080–U+009F) are stripped.
+- Unicode bidirectional text override characters (U+200E–U+200F,
+  U+202A–U+202E, U+2066–U+2069) and zero-width characters (U+200B–U+200D,
+  U+FEFF) are stripped to prevent misleading terminal output.
 - Embedded newlines, carriage returns, and tabs are removed from external
   sender names and message text.
 - Display names and message text are truncated to their maximum lengths.
+- Any required field that becomes empty after sanitization triggers the
+  malformed-message path.
 - Terminal control sequences injected by other participants cannot affect
   the local display.
 - Unicode, including Portuguese text and emoji, is preserved where the
   terminal supports it.
-- Extremely long lines are truncated.
 
 ## Error Behavior
 
-- **Broker unavailable**: Warning displayed, polling continues with backoff.
+- **Broker unavailable at startup**: Error displayed, state set to `error`,
+  client closed, no polling started. The user must restart the chat.
+- **Broker unavailable during operation**: Warning displayed, polling continues
+  with backoff. Repeated identical outage warnings are coalesced (only the
+  first warning is shown). The warning is cleared automatically after the
+  first successful consume following recovery.
+- **Shutdown during outage/backoff**: Cancellation is immediate — backoff
+  timers are cleared, no further polls are scheduled, and the client is closed.
 - **Connection failure on startup**: Error displayed, state set to `error`.
-- **Message send failure**: Error displayed, user can retry.
+  The user must restart the chat to attempt reconnection.
+- **Message send failure**: Error displayed, user can retry. Unsent input is
+  preserved in the input buffer.
 - **Malformed messages from broker**: Acked immediately, warning logged.
 - **Topic creation race**: `TOPIC_ALREADY_EXISTS` / `ALREADY_EXISTS` treated
   as success.
+- **Permanent errors (SDK configuration, serialization)**: Error emitted with
+  backoff applied; polling does not enter a busy loop.
+- **Transparent reconnection is not supported**: If the broker goes down and
+  restarts, the chat session does not automatically recover its consumer-group
+  state. The user must restart the chat (`Esc`, then re-launch).
 
 ## Security
 
@@ -275,6 +302,11 @@ Do not use this chat for sensitive communication.
 - No web UI.
 - Session-local deduplication is not exactly-once delivery.
 - No non-interactive send/receive mode.
+- No transparent reconnection after broker restart.
+- Consumer groups accumulate indefinitely; no cleanup mechanism.
+- Platform support: developed and tested on Linux. SIGTERM behavior may differ
+  on Windows and macOS; Esc, Ctrl+C, unmount, and normal exit cleanup are
+  correct on every platform. Full Windows support is not validated by CI.
 
 ## Testing
 

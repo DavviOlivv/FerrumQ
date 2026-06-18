@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { FerrumQClient, FerrumQError } from "@ferrumq/sdk";
+import { DEFAULT_POLL_INTERVAL_MS, DEFAULT_TIMEOUT_MS } from "./config.js";
 import {
   buildChatMessage,
   DeduplicationCache,
@@ -14,7 +15,6 @@ import {
   validateName,
   validateRoom,
 } from "./domain.js";
-import { DEFAULT_POLL_INTERVAL_MS, DEFAULT_TIMEOUT_MS } from "./config.js";
 
 export interface ChatAppOptions {
   httpUrl: string;
@@ -35,7 +35,7 @@ export interface ChatAppDeps {
   onMessage: (message: DisplayMessage) => void;
   onStateChange: (state: ChatState) => void;
   onError: (message: string) => void;
-  onWarning: (message: string) => void;
+  onWarning: (message: string | null) => void;
   onDebug?: (message: string) => void;
 }
 
@@ -52,6 +52,7 @@ export class ChatApp {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private pollBackoffMs = 0;
+  private lastWarningText: string | null = null;
 
   constructor(options: ChatAppOptions, deps: ChatAppDeps) {
     const room = validateRoom(options.room);
@@ -241,6 +242,11 @@ export class ChatApp {
 
       this.pollBackoffMs = 0;
 
+      if (this.lastWarningText !== null) {
+        this.lastWarningText = null;
+        this.deps.onWarning(null);
+      }
+
       for (const delivery of deliveries) {
         if (this.stopped || signal?.aborted) {
           break;
@@ -284,11 +290,16 @@ export class ChatApp {
         if (error.transport === "http" || error.transport === "grpc") {
           this.applyBackoff();
           this.emitWarning(`Broker unavailable: ${error.message}`);
+        } else if (error.code === "SDK_TIMEOUT") {
+          this.applyBackoff();
+          this.emitWarning(`Consume timed out: ${error.message}`);
         } else {
           this.emitError(`Chat error: ${error.message}`);
+          return;
         }
       } else {
         this.emitError(`Unexpected error: ${errorMessage(error)}`);
+        return;
       }
     }
 
@@ -361,6 +372,10 @@ export class ChatApp {
   }
 
   private emitWarning(message: string): void {
+    if (message === this.lastWarningText) {
+      return;
+    }
+    this.lastWarningText = message;
     this.deps.onWarning(message);
   }
 }

@@ -120,7 +120,7 @@ export function ChatUi({
           setError(msg);
         }
       },
-      onWarning: (msg: string) => {
+      onWarning: (msg: string | null) => {
         if (isCurrent()) {
           setWarning(msg);
         }
@@ -176,8 +176,18 @@ export function ChatUi({
     if (trimmed.length === 0) {
       return;
     }
-    setInput("");
-    activeGeneration.current?.app.sendMessage(trimmed).catch(() => {});
+    const app = activeGeneration.current?.app;
+    if (app === undefined) {
+      return;
+    }
+    app
+      .sendMessage(trimmed)
+      .then((ok) => {
+        if (ok) {
+          setInput("");
+        }
+      })
+      .catch(() => {});
   }, [input]);
 
   const handleQuit = useCallback(() => {

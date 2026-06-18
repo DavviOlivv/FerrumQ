@@ -174,6 +174,30 @@ describe("sanitizeDisplay", () => {
   it("preserves accented text and emoji", () => {
     expect(sanitizeDisplay("olá, ação 🎉")).toBe("olá, ação 🎉");
   });
+
+  it("strips OSC sequences used for terminal title injection", () => {
+    const input = "\x1b]0;malicious title\x07Hello";
+    const result = sanitizeDisplay(input);
+    expect(result).toBe("Hello");
+  });
+
+  it("strips OSC sequences with ST terminator", () => {
+    const input = "safe\x1b]0;hijack\x1b\\text";
+    const result = sanitizeDisplay(input);
+    expect(result).toBe("safetext");
+  });
+
+  it("strips bidirectional text override characters", () => {
+    const input = "\u202e\u2066Hello\u2069\u202cWorld";
+    const result = sanitizeDisplay(input);
+    expect(result).toBe("HelloWorld");
+  });
+
+  it("strips zero-width characters but preserves visible text", () => {
+    const input = "\u200bH\u200ci\u200d";
+    const result = sanitizeDisplay(input);
+    expect(result).toBe("Hi");
+  });
 });
 
 describe("buildChatMessage", () => {

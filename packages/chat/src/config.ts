@@ -35,9 +35,27 @@ export function parseChatArgs(
   let wantHelp = false;
   let wantVersion = false;
   const errors: string[] = [];
+  const seen = new Set<string>();
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] ?? "";
+
+    if (arg.startsWith("--")) {
+      const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+      if (seen.has(flag)) {
+        errors.push(`duplicate option: ${arg}`);
+        if (
+          !arg.includes("=") &&
+          i + 1 < args.length &&
+          !(args[i + 1] ?? "").startsWith("-")
+        ) {
+          i++;
+        }
+        continue;
+      }
+      seen.add(flag);
+    }
+
     switch (arg) {
       case "--help":
       case "-h":
@@ -113,13 +131,17 @@ export function parseChatArgs(
       }
       default: {
         if (arg.startsWith("--name=")) {
-          name = arg.slice("--name=".length);
+          const raw = arg.slice("--name=".length);
+          name = raw.startsWith("=") ? raw.slice(1) : raw;
         } else if (arg.startsWith("--room=")) {
-          room = arg.slice("--room=".length);
+          const raw = arg.slice("--room=".length);
+          room = raw.startsWith("=") ? raw.slice(1) : raw;
         } else if (arg.startsWith("--http-url=")) {
-          httpUrl = arg.slice("--http-url=".length);
+          const raw = arg.slice("--http-url=".length);
+          httpUrl = raw.startsWith("=") ? raw.slice(1) : raw;
         } else if (arg.startsWith("--grpc-url=")) {
-          grpcUrl = arg.slice("--grpc-url=".length);
+          const raw = arg.slice("--grpc-url=".length);
+          grpcUrl = raw.startsWith("=") ? raw.slice(1) : raw;
         } else if (arg.startsWith("--timeout-ms=")) {
           const parsed = parseUnsignedInteger(
             arg.slice("--timeout-ms=".length),

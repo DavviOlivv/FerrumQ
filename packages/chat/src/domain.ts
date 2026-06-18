@@ -123,8 +123,13 @@ export function validateText(raw: string): string {
 }
 
 export function sanitizeControlChars(value: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional sanitization regex
-  return value.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+  return (
+    value
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional C0/C1 sanitization regex
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+      .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+      .replace(/[\u200b-\u200d\ufeff]/g, "")
+  );
 }
 
 export function stripAnsiEscapeSequences(value: string): string {
@@ -132,6 +137,8 @@ export function stripAnsiEscapeSequences(value: string): string {
     value
       // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI CSI sanitization
       .replace(/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g, "")
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI OSC sanitization
+      .replace(/\u001b\].*?(?:\u0007|\u001b\\|\u009c)/g, "")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI escape sanitization
       .replace(/\u001b/g, "")
   );

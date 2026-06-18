@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
-    "test": "pnpm run build && (test -x ../../target/debug/brokerd || cargo build --manifest-path ../../Cargo.toml -p msg-runtime --bin brokerd) && vitest run",
+    "test": "pnpm run build && (node -e \"require('fs').existsSync('../../target/debug/brokerd')\" || cargo build --manifest-path ../../Cargo.toml -p msg-runtime --bin brokerd) && vitest run",
     "typecheck": "pnpm run build && tsc --noEmit"
   },
   "dependencies": {

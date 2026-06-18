@@ -16,8 +16,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && chmod +x dist/cli.js",
-    "test": "pnpm run build && (test -x ../../target/debug/brokerd || cargo build --manifest-path ../../Cargo.toml -p msg-runtime --bin brokerd) && vitest run",
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && node -e \"process.platform !== 'win32' && require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "test": "pnpm run build && (node -e \"require('fs').existsSync('../../target/debug/brokerd')\" || cargo build --manifest-path ../../Cargo.toml -p msg-runtime --bin brokerd) && vitest run",
     "typecheck": "pnpm run build && tsc --noEmit"
   },
   "dependencies": {

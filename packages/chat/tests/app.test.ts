@@ -43,7 +43,7 @@ function createDeps() {
     messages: unknown[];
     states: unknown[];
     errors: string[];
-    warnings: string[];
+    warnings: (string | null)[];
   } = {
     messages: [],
     states: [],
@@ -448,7 +448,7 @@ describe("ChatApp", () => {
       );
       expect(deps.messages).toEqual([]);
       expect(
-        deps.warnings.filter((warning) => warning.includes("(invalid-id)")),
+        deps.warnings.filter((warning) => warning?.includes("(invalid-id)")),
       ).toHaveLength(2);
     } finally {
       await app.stop();
@@ -774,6 +774,235 @@ describe("ChatApp", () => {
       expect(mockClient.consume).toHaveBeenCalledOnce();
       expect(deps.errors).not.toContain("Poll error: CANCELLED");
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports error on startup failure and does not start polling", async () => {
+    mockClient.health.mockRejectedValue(new Error("Connection refused"));
+
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+      },
+      deps,
+    );
+
+    await app.start();
+    expect(deps.states).toContainEqual(
+      expect.objectContaining({ status: "error" }),
+    );
+    expect(mockClient.consume).not.toHaveBeenCalled();
+    expect(mockClient.close).toHaveBeenCalledOnce();
+    await app.stop();
+  });
+
+  it("coalesces repeated identical outage warnings", async () => {
+    vi.useFakeTimers();
+    const { FerrumQError } = await import("@ferrumq/sdk");
+    const unavailable = new FerrumQError("broker gone", {
+      transport: "grpc",
+    });
+    mockClient.consume.mockRejectedValue(unavailable);
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 100,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(200);
+
+      const outageWarnings = deps.warnings.filter((w) =>
+        w?.startsWith("Broker unavailable:"),
+      );
+      expect(outageWarnings).toHaveLength(1);
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears warning after outage recovery", async () => {
+    vi.useFakeTimers();
+    const { FerrumQError } = await import("@ferrumq/sdk");
+    const unavailable = new FerrumQError("unavailable", {
+      transport: "grpc",
+    });
+    mockClient.consume
+      .mockRejectedValueOnce(unavailable)
+      .mockRejectedValueOnce(unavailable)
+      .mockResolvedValueOnce([]);
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 500,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(
+        deps.warnings.some((w) => w?.startsWith("Broker unavailable:")),
+      ).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(deps.warnings).toContain(null);
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("emits error on publish failure and does not retry", async () => {
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+      },
+      deps,
+    );
+
+    await app.start();
+    mockClient.publish.mockRejectedValue(new Error("gRPC UNAVAILABLE"));
+    const result = await app.sendMessage("hello");
+    expect(result).toBe(false);
+    expect(mockClient.publish).toHaveBeenCalledTimes(1);
+    expect(deps.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Failed to send message"),
+      ]),
+    );
+    await app.stop();
+  });
+
+  it("stops polling permanently after a non-retryable SDK error", async () => {
+    vi.useFakeTimers();
+    const { FerrumQError } = await import("@ferrumq/sdk");
+    mockClient.consume.mockRejectedValue(
+      new FerrumQError("invalid response", {
+        transport: "sdk",
+        code: "SDK_INVALID_RESPONSE",
+      }),
+    );
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 100,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(mockClient.consume).toHaveBeenCalledOnce();
+      expect(deps.errors).toEqual(
+        expect.arrayContaining([expect.stringContaining("Chat error:")]),
+      );
+
+      await vi.runAllTimersAsync();
+      expect(mockClient.consume).toHaveBeenCalledOnce();
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies backoff and retries on SDK_TIMEOUT (transient)", async () => {
+    vi.useFakeTimers();
+    const { FerrumQError } = await import("@ferrumq/sdk");
+    mockClient.consume.mockRejectedValue(
+      new FerrumQError("deadline exceeded", {
+        transport: "sdk",
+        code: "SDK_TIMEOUT",
+      }),
+    );
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 100,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(mockClient.consume).toHaveBeenCalledOnce();
+      expect(deps.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("Consume timed out:")]),
+      );
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(mockClient.consume).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockClient.consume).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops polling on unexpected non-FerrumQError errors", async () => {
+    vi.useFakeTimers();
+    mockClient.consume.mockRejectedValue(new Error("something broke"));
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 100,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(mockClient.consume).toHaveBeenCalledOnce();
+      expect(deps.errors).toEqual(
+        expect.arrayContaining([expect.stringContaining("Unexpected error:")]),
+      );
+
+      await vi.runAllTimersAsync();
+      expect(mockClient.consume).toHaveBeenCalledOnce();
+    } finally {
+      await app.stop();
       vi.useRealTimers();
     }
   });

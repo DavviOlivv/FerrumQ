@@ -138,4 +138,93 @@ describe("runChatCli shutdown lifecycle", () => {
       expect.any(Function),
     );
   });
+
+  it("prints help text and returns exit code 0 for --help", async () => {
+    const result = await runChatCli(
+      ["--help"],
+      output,
+      {},
+      createRuntime().runtime,
+    );
+    expect(result).toBe(0);
+    expect(output.writeLine).toHaveBeenCalledWith(
+      expect.stringContaining("ferrumq-chat - Terminal chat over FerrumQ"),
+    );
+  });
+
+  it("prints version and returns exit code 0 for --version", async () => {
+    const result = await runChatCli(
+      ["--version"],
+      output,
+      {},
+      createRuntime().runtime,
+    );
+    expect(result).toBe(0);
+    expect(output.writeLine).toHaveBeenCalledWith("ferrumq-chat 0.1.0");
+  });
+
+  it("returns exit code 1 when --help and --version are combined", async () => {
+    const result = await runChatCli(
+      ["--help", "--version"],
+      output,
+      {},
+      createRuntime().runtime,
+    );
+    expect(result).toBe(1);
+    expect(output.writeError).toHaveBeenCalledWith(
+      expect.stringContaining("--help and --version cannot be combined"),
+    );
+  });
+
+  it("returns exit code 1 for missing required options", async () => {
+    const result = await runChatCli(
+      ["--name", "Alice"],
+      output,
+      {},
+      createRuntime().runtime,
+    );
+    expect(result).toBe(1);
+    expect(output.writeError).toHaveBeenCalledWith(
+      expect.stringContaining("--room is required"),
+    );
+  });
+
+  it("returns exit code 1 for an invalid display name", async () => {
+    const result = await runChatCli(
+      ["--name", "!!!", "--room", "general"],
+      output,
+      {},
+      createRuntime().runtime,
+    );
+    expect(result).toBe(1);
+    expect(output.writeError).toHaveBeenCalledWith(
+      expect.stringContaining("Invalid display name"),
+    );
+  });
+
+  it("returns exit code 1 for an invalid room name", async () => {
+    const result = await runChatCli(
+      ["--name", "Alice", "--room", "###"],
+      output,
+      {},
+      createRuntime().runtime,
+    );
+    expect(result).toBe(1);
+    expect(output.writeError).toHaveBeenCalledWith(
+      expect.stringContaining("Invalid room name"),
+    );
+  });
+
+  it("returns exit code 1 for unknown options", async () => {
+    const result = await runChatCli(
+      ["--name", "Alice", "--room", "general", "--bogus"],
+      output,
+      {},
+      createRuntime().runtime,
+    );
+    expect(result).toBe(1);
+    expect(output.writeError).toHaveBeenCalledWith(
+      expect.stringContaining("unknown option"),
+    );
+  });
 });

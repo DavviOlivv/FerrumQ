@@ -284,6 +284,18 @@ describe("ChatUi", () => {
 
     expect(clientAt(0).close).toHaveBeenCalledOnce();
   });
+
+  it("calls client close on unmount without unhandled rejections", async () => {
+    const view = render(<ChatUi config={baseConfig} />);
+    await flushEffects();
+
+    const client = clientAt(0);
+    expect(client.close).not.toHaveBeenCalled();
+
+    view.unmount();
+    await flushEffects();
+    expect(client.close).toHaveBeenCalledOnce();
+  });
 });
 
 function clients(): MockClient[] {

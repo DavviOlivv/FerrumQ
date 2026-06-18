@@ -452,3 +452,42 @@ Deferred from Milestone 13:
 - PostgreSQL history and search.
 - Cluster mode and replication.
 - Exactly-once delivery.
+
+### Milestone 13 Hardening Summary
+
+**Multi-client reliability**: Tested with 3+ clients, identical display names,
+multiple rooms, concurrent topic creation, client shutdown isolation, and
+history-from-offset-0 replay. All participants receive expected messages through
+independent consumer groups. Session-local deduplication prevents double display.
+
+**Outage and recovery**: Broker unavailable at startup → error state, no polling.
+Outage during consume → exponential backoff cap at 30s, warnings coalesced,
+cleared on recovery. Publish failures → no automatic retry, unsent input
+preserved. Shutdown during backoff → immediate, no timer leaks. Permanent SDK
+errors → backoff applied to prevent busy loops.
+
+**Polling and timer correctness**: One consume RPC per session, normal and
+backoff delays bounded by Node.js safe timer limits, AbortController-based
+cancellation, timers cleared on shutdown, fake-timer tests isolate state.
+
+**Lifecycle safety**: Equivalent config rerenders preserve the active session.
+Genuine config changes stop old generation before starting new one. Cleanup runs
+once per generation. Stale async callbacks cannot mutate the current generation.
+Shutdown is idempotent. Signal listeners are removed.
+
+**Terminal safety**: OSC sequences, ANSI CSI, C0/C1 controls, bidirectional text
+override characters, and zero-width characters are stripped. Ordinary Unicode,
+Portuguese text, and emoji are preserved. Fields empty after sanitization follow
+the malformed-message path.
+
+**Input and configuration**: CLI flags take precedence over env vars over defaults.
+Duplicate flags are rejected. Equals-form values are handled correctly including
+edge cases (`--name==foo` → `foo`). Unknown flags are flagged.
+
+**Portability**: Build scripts use Node.js APIs for chmod and binary detection
+(macOS compatible, graceful no-op on Windows). SIGTERM behavior is
+platform-dependent; Esc, Ctrl+C, unmount, and normal exit cleanup are correct
+on every supported platform.
+
+Broker semantics and protocol/storage formats were unchanged. No Rust crate
+changes. No release tag created. `.ferrumq/` remains ignored and untracked.
