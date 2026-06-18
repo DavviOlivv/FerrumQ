@@ -12,7 +12,8 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "test": "pnpm -r --workspace-concurrency=1 run test",
-    "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck",
+    "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck && pnpm run examples:typecheck",
+    "examples:typecheck": "pnpm --filter @ferrumq/sdk run build && tsc -p tsconfig.examples.json --noEmit",
     "ci": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {

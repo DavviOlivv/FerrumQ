@@ -81,13 +81,27 @@ export interface ResponseLike {
 }
 
 export interface ControlPlaneClient {
-  health(): Promise<HttpStatusResponse>;
-  ready(): Promise<HttpStatusResponse>;
-  status(): Promise<BrokerStatusResponse>;
-  createTopic(name: string, partitions: number): Promise<TopicResponse>;
-  getTopic(name: string): Promise<TopicResponse>;
-  listTopics(): Promise<TopicListResponse>;
-  listDlq(topic?: string): Promise<DlqListResponse>;
+  health(options?: ControlPlaneCallOptions): Promise<HttpStatusResponse>;
+  ready(options?: ControlPlaneCallOptions): Promise<HttpStatusResponse>;
+  status(options?: ControlPlaneCallOptions): Promise<BrokerStatusResponse>;
+  createTopic(
+    name: string,
+    partitions: number,
+    options?: ControlPlaneCallOptions,
+  ): Promise<TopicResponse>;
+  getTopic(
+    name: string,
+    options?: ControlPlaneCallOptions,
+  ): Promise<TopicResponse>;
+  listTopics(options?: ControlPlaneCallOptions): Promise<TopicListResponse>;
+  listDlq(
+    topic?: string,
+    options?: ControlPlaneCallOptions,
+  ): Promise<DlqListResponse>;
+}
+
+export interface ControlPlaneCallOptions {
+  signal?: AbortSignal;
 }
 
 export type ControlPlaneRequestErrorKind =
@@ -135,25 +149,37 @@ export function createControlPlaneClient(
   fetchImpl: FetchLike = fetch as FetchLike,
 ): ControlPlaneClient {
   return {
-    health: () =>
+    health: (options) =>
       request(
         controlUrl,
         fetchImpl,
         "GET",
         "/health",
         httpStatusResponseSchema,
+        undefined,
+        options,
       ),
-    ready: () =>
-      request(controlUrl, fetchImpl, "GET", "/ready", httpStatusResponseSchema),
-    status: () =>
+    ready: (options) =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "GET",
+        "/ready",
+        httpStatusResponseSchema,
+        undefined,
+        options,
+      ),
+    status: (options) =>
       request(
         controlUrl,
         fetchImpl,
         "GET",
         "/v1/status",
         brokerStatusResponseSchema,
+        undefined,
+        options,
       ),
-    createTopic: (name, partitions) =>
+    createTopic: (name, partitions, options) =>
       request(
         controlUrl,
         fetchImpl,
@@ -164,24 +190,29 @@ export function createControlPlaneClient(
           name,
           partitions,
         },
+        options,
       ),
-    getTopic: (name) =>
+    getTopic: (name, options) =>
       request(
         controlUrl,
         fetchImpl,
         "GET",
         `/v1/topics/${encodeURIComponent(name)}`,
         topicResponseSchema,
+        undefined,
+        options,
       ),
-    listTopics: () =>
+    listTopics: (options) =>
       request(
         controlUrl,
         fetchImpl,
         "GET",
         "/v1/topics",
         topicListResponseSchema,
+        undefined,
+        options,
       ),
-    listDlq: (topic) =>
+    listDlq: (topic, options) =>
       request(
         controlUrl,
         fetchImpl,
@@ -190,6 +221,8 @@ export function createControlPlaneClient(
           ? "/v1/dlq"
           : `/v1/dlq?topic=${encodeURIComponent(topic)}`,
         dlqListResponseSchema,
+        undefined,
+        options,
       ),
   };
 }
@@ -201,6 +234,7 @@ async function request<T>(
   requestPath: string,
   schema: ZodType<T>,
   body?: unknown,
+  options?: ControlPlaneCallOptions,
 ): Promise<T> {
   const url = buildUrl(controlUrl, requestPath);
   let response: ResponseLike;
@@ -209,7 +243,11 @@ async function request<T>(
       method: string;
       headers?: Record<string, string>;
       body?: string;
+      signal?: AbortSignal;
     } = { method };
+    if (options?.signal !== undefined) {
+      init.signal = options.signal;
+    }
     if (body !== undefined) {
       init.headers = { "content-type": "application/json" };
       init.body = JSON.stringify(body);
@@ -383,11 +421,27 @@ export interface DataPlaneNackRequest {
 }
 
 export interface DataPlaneClient {
-  publish(request: DataPlanePublishRequest): Promise<DataPlanePublishResponse>;
-  consume(request: DataPlaneConsumeRequest): Promise<DataPlaneConsumeResponse>;
-  ack(request: DataPlaneAckRequest): Promise<void>;
-  nack(request: DataPlaneNackRequest): Promise<void>;
+  publish(
+    request: DataPlanePublishRequest,
+    options?: DataPlaneCallOptions,
+  ): Promise<DataPlanePublishResponse>;
+  consume(
+    request: DataPlaneConsumeRequest,
+    options?: DataPlaneCallOptions,
+  ): Promise<DataPlaneConsumeResponse>;
+  ack(
+    request: DataPlaneAckRequest,
+    options?: DataPlaneCallOptions,
+  ): Promise<void>;
+  nack(
+    request: DataPlaneNackRequest,
+    options?: DataPlaneCallOptions,
+  ): Promise<void>;
   close(): void;
+}
+
+export interface DataPlaneCallOptions {
+  deadline?: Date | number;
 }
 
 type RawGrpcCallback = (
@@ -396,8 +450,9 @@ type RawGrpcCallback = (
 ) => void;
 type RawGrpcMethod = (
   request: Record<string, unknown>,
+  options: grpc.CallOptions,
   callback: RawGrpcCallback,
-) => void;
+) => grpc.ClientUnaryCall;
 type RawGrpcClient = Record<string, unknown>;
 
 export interface GrpcDataPlaneClientOptions {
@@ -438,10 +493,16 @@ export function normalizeGrpcTarget(grpcUrl: string): string {
 
 export function defaultDataPlaneProtoPath(): string {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const repoRoot = path.resolve(moduleDir, "../../..");
+  const packagedPath = path.resolve(
+    moduleDir,
+    "proto/ferrumq/dataplane/v1/dataplane.proto",
+  );
+  if (existsSync(packagedPath)) {
+    return packagedPath;
+  }
   return path.resolve(
-    repoRoot,
-    "crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto",
+    moduleDir,
+    "../../../crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto",
   );
 }
 
@@ -454,21 +515,31 @@ export function createGrpcDataPlaneClient(
   const rawClient =
     options.createRawClient?.(target, protoPath) ??
     createDefaultRawClient(target, protoPath);
+  const activeCalls = new Set<ActiveUnaryCall>();
+  let closed = false;
 
   return {
-    async publish(request) {
-      const response = await callUnary(rawClient, "publish", "Publish", {
-        topic: request.topic,
-        messageId: request.messageId,
-        key: request.key ?? "",
-        payload: Buffer.from(request.payload),
-        contentType: request.contentType,
-        type: request.type,
-        source: request.source,
-        subject: request.subject ?? "",
-        idempotencyKey: request.idempotencyKey ?? "",
-        timeUnixMs: request.timeUnixMs,
-      });
+    async publish(request, callOptions) {
+      const response = await callUnary(
+        rawClient,
+        activeCalls,
+        () => closed,
+        "publish",
+        "Publish",
+        {
+          topic: request.topic,
+          messageId: request.messageId,
+          key: request.key ?? "",
+          payload: Buffer.from(request.payload),
+          contentType: request.contentType,
+          type: request.type,
+          source: request.source,
+          subject: request.subject ?? "",
+          idempotencyKey: request.idempotencyKey ?? "",
+          timeUnixMs: request.timeUnixMs,
+        },
+        callOptions,
+      );
 
       return {
         topic: stringField(response, "topic"),
@@ -478,15 +549,23 @@ export function createGrpcDataPlaneClient(
       };
     },
 
-    async consume(request) {
-      const response = await callUnary(rawClient, "consume", "Consume", {
-        topic: request.topic,
-        consumerGroup: request.consumerGroup,
-        consumerId: request.consumerId,
-        maxMessages: request.maxMessages,
-        leaseMs: request.leaseMs,
-        nowUnixMs: request.nowUnixMs,
-      });
+    async consume(request, callOptions) {
+      const response = await callUnary(
+        rawClient,
+        activeCalls,
+        () => closed,
+        "consume",
+        "Consume",
+        {
+          topic: request.topic,
+          consumerGroup: request.consumerGroup,
+          consumerId: request.consumerId,
+          maxMessages: request.maxMessages,
+          leaseMs: request.leaseMs,
+          nowUnixMs: request.nowUnixMs,
+        },
+        callOptions,
+      );
 
       return {
         messages: arrayField(response, "messages").map((message) => ({
@@ -515,24 +594,50 @@ export function createGrpcDataPlaneClient(
       };
     },
 
-    async ack(request) {
-      await callUnary(rawClient, "ack", "Ack", {
-        deliveryId: request.deliveryId,
-        consumerId: request.consumerId,
-      });
+    async ack(request, callOptions) {
+      await callUnary(
+        rawClient,
+        activeCalls,
+        () => closed,
+        "ack",
+        "Ack",
+        {
+          deliveryId: request.deliveryId,
+          consumerId: request.consumerId,
+        },
+        callOptions,
+      );
     },
 
-    async nack(request) {
-      await callUnary(rawClient, "nack", "Nack", {
-        deliveryId: request.deliveryId,
-        consumerId: request.consumerId,
-        reason: request.reason ?? "",
-      });
+    async nack(request, callOptions) {
+      await callUnary(
+        rawClient,
+        activeCalls,
+        () => closed,
+        "nack",
+        "Nack",
+        {
+          deliveryId: request.deliveryId,
+          consumerId: request.consumerId,
+          reason: request.reason ?? "",
+        },
+        callOptions,
+      );
     },
 
     close() {
-      const closeable = rawClient as unknown as { close(): void };
-      closeable.close();
+      if (closed) {
+        return;
+      }
+      closed = true;
+      for (const active of activeCalls) {
+        active.settled = true;
+        active.call?.cancel();
+        active.reject(closedGrpcError());
+      }
+      activeCalls.clear();
+      const closeable = rawClient as unknown as { close?: () => void };
+      closeable.close?.();
     },
   };
 }
@@ -612,26 +717,77 @@ function resolveFerrumQDataPlaneService(
   ) => unknown;
 }
 
+interface ActiveUnaryCall {
+  call?: grpc.ClientUnaryCall;
+  reject(error: unknown): void;
+  settled: boolean;
+}
+
+function closedGrpcError(): Error & { code: number; details: string } {
+  const error = new Error("gRPC client is closed") as Error & {
+    code: number;
+    details: string;
+  };
+  error.code = grpc.status.CANCELLED;
+  error.details = "gRPC client is closed";
+  return error;
+}
+
 function callUnary(
   client: RawGrpcClient,
+  activeCalls: Set<ActiveUnaryCall>,
+  isClosed: () => boolean,
   lowerName: string,
   upperName: string,
   request: Record<string, unknown>,
+  options?: DataPlaneCallOptions,
 ): Promise<Record<string, unknown>> {
+  if (isClosed()) {
+    return Promise.reject(closedGrpcError());
+  }
   const method = client[lowerName] ?? client[upperName];
   if (typeof method !== "function") {
-    throw new Error(`gRPC client does not expose ${upperName}`);
+    return Promise.reject(
+      new Error(`gRPC client does not expose ${upperName}`),
+    );
   }
 
   return new Promise((resolve, reject) => {
-    (method as RawGrpcMethod).call(client, request, (error, response) => {
+    const active: ActiveUnaryCall = { reject, settled: false };
+    activeCalls.add(active);
+    const callOptions: grpc.CallOptions = {};
+    if (options?.deadline !== undefined) {
+      callOptions.deadline = options.deadline;
+    }
+    const callback: RawGrpcCallback = (error, response) => {
+      if (active.settled) {
+        return;
+      }
+      active.settled = true;
+      activeCalls.delete(active);
       if (error !== null) {
         reject(error);
         return;
       }
 
-      resolve(recordValue(response));
-    });
+      try {
+        resolve(recordValue(response));
+      } catch (shapeError) {
+        reject(shapeError);
+      }
+    };
+    try {
+      active.call = (method as RawGrpcMethod).call(
+        client,
+        request,
+        callOptions,
+        callback,
+      );
+    } catch (error) {
+      active.settled = true;
+      activeCalls.delete(active);
+      reject(error);
+    }
   });
 }
 

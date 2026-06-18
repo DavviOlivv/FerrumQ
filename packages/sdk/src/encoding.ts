@@ -14,7 +14,10 @@ export function encodePayload(payload: unknown): EncodedPayload {
   }
 
   if (payload instanceof Uint8Array) {
-    return { data: payload, contentType: "application/octet-stream" };
+    return {
+      data: new Uint8Array(payload),
+      contentType: "application/octet-stream",
+    };
   }
 
   if (
@@ -29,6 +32,7 @@ export function encodePayload(payload: unknown): EncodedPayload {
     } catch (error) {
       throw new FerrumQError("Failed to serialize payload as JSON", {
         transport: "sdk",
+        code: "SDK_SERIALIZATION",
         cause: error,
       });
     }
@@ -36,7 +40,7 @@ export function encodePayload(payload: unknown): EncodedPayload {
     if (typeof serialized !== "string") {
       throw new FerrumQError(
         "Failed to serialize payload as JSON: serialization returned undefined",
-        { transport: "sdk" },
+        { transport: "sdk", code: "SDK_SERIALIZATION" },
       );
     }
 
@@ -48,6 +52,6 @@ export function encodePayload(payload: unknown): EncodedPayload {
 
   throw new FerrumQError(
     `Unsupported payload type: ${typeof payload}. Supported types: string, Uint8Array, Buffer, and JSON-compatible values.`,
-    { transport: "sdk" },
+    { transport: "sdk", code: "SDK_SERIALIZATION" },
   );
 }

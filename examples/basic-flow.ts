@@ -1,7 +1,10 @@
-import { FerrumQClient, type Topic } from "@ferrumq/sdk";
+import { FerrumQClient, FerrumQError, type Topic } from "@ferrumq/sdk";
 
 const HTTP_URL = process.env.FERRUMQ_HTTP_URL ?? "http://127.0.0.1:8080";
 const GRPC_URL = process.env.FERRUMQ_GRPC_URL ?? "http://127.0.0.1:9090";
+const TOPIC =
+  process.env.FERRUMQ_EXAMPLE_TOPIC ??
+  `orders-basic-${process.pid}-${Date.now()}`;
 
 async function main() {
   const client = new FerrumQClient({
@@ -22,10 +25,12 @@ async function main() {
     console.log("--- createTopic ---");
     let topic: Topic | undefined;
     try {
-      topic = await client.createTopic({ name: "orders", partitions: 3 });
+      topic = await client.createTopic({ name: TOPIC, partitions: 3 });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("TOPIC_ALREADY_EXISTS") || message.includes("409")) {
+      if (
+        error instanceof FerrumQError &&
+        (error.code === "TOPIC_ALREADY_EXISTS" || error.status === 409)
+      ) {
         console.log("topic already exists, continuing");
       } else {
         throw error;
@@ -41,7 +46,7 @@ async function main() {
 
     console.log("--- publish ---");
     const published = await client.publish({
-      topic: "orders",
+      topic: TOPIC,
       key: "account-1",
       payload: { orderId: 1, status: "created" },
     });
@@ -49,7 +54,7 @@ async function main() {
 
     console.log("--- consume ---");
     const deliveries = await client.consume({
-      topic: "orders",
+      topic: TOPIC,
       group: "workers",
       consumerId: "worker-1",
       maxMessages: 1,
@@ -60,7 +65,7 @@ async function main() {
       console.log(`  partition: ${delivery.partition}`);
       console.log(`  offset:    ${delivery.offset}`);
       console.log(`  attempt:   ${delivery.attemptNumber}`);
-      console.log(`  payload:   ${new TextDecoder().decode(delivery.payload)}`);
+      console.log(`  payload bytes: ${delivery.payload.byteLength}`);
 
       console.log("--- ack ---");
       await client.ack({

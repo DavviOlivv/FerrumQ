@@ -77,12 +77,12 @@ failure handling, gRPC error mapping, timeout/deadline rejection, idempotent
 defaults, ACK/NACK, and public exports. Tests mock the fetch transport and do
 not require a running broker.
 
-Process-level TypeScript gRPC integration is deferred because `brokerd
-serve-grpc --listen 127.0.0.1:0` and `brokerd serve-all --grpc-listen
-127.0.0.1:0` do not expose the selected port; Rust in-process gRPC tests and
-the Rust unified-runtime socket test cover service semantics. TUI behavior
-should remain component and command-boundary coverage without reimplementing
-Rust broker semantics.
+The SDK process-level integration suite reserves explicit loopback ports,
+builds or reuses `target/debug/brokerd`, launches `brokerd serve-all`, imports
+the built SDK package entry point, and covers health, readiness, topic creation,
+publish, unary consume, ACK, status, metrics, and cleanup. Only explicit
+loopback permission failures are skipped; startup and correctness failures
+remain test failures.
 
 ## CI Gates
 
@@ -98,6 +98,7 @@ The local and CI release gate is `make ci`, which runs:
 - `pnpm format:check`.
 - `pnpm lint`.
 - `pnpm typecheck`.
+- `pnpm run examples:typecheck`.
 - `pnpm test`.
 - `pnpm build`.
 - `node packages/cli/dist/cli.js --version`.

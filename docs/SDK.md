@@ -73,9 +73,11 @@ const client = new FerrumQClient({
 
 - `httpUrl` (required): HTTP control plane URL. Supports `http://` and `https://`.
 - `grpcUrl` (required): gRPC data plane URL. Must be `http://host:port` (no TLS, no path).
-- `timeoutMs` (optional): Per-request timeout in milliseconds. When set, operations that
-  exceed this duration reject with a `FerrumQError` with transport `"sdk"`. Omitted or zero
-  means no timeout.
+- `timeoutMs` (optional): Per-request timeout in milliseconds. When set to a positive
+  value, operations that exceed this duration reject with `code: "SDK_TIMEOUT"`. It
+  must be a finite integer no greater than Node's safe timer maximum. A value of
+  `0` means no SDK-enforced timeout or gRPC deadline; in-flight operations may hang
+  indefinitely. Callers should configure a finite timeout for networked usage.
 
 Configuration is validated at construction time. Invalid or missing URLs throw
 `FerrumQError`.
@@ -237,13 +239,18 @@ The SDK encodes payloads deterministically:
 | Payload Type                                                            | Encoding                          | Content-Type               |
 | ----------------------------------------------------------------------- | --------------------------------- | -------------------------- |
 | `string`                                                                | UTF-8 bytes                       | `text/plain`               |
-| `Uint8Array`                                                            | As-is                             | `application/octet-stream` |
-| `Buffer`                                                                | As-is (Buffer extends Uint8Array) | `application/octet-stream` |
+| `Uint8Array`                                                            | Copied bytes                       | `application/octet-stream` |
+| `Buffer`                                                                | Copied bytes                       | `application/octet-stream` |
 | JSON-compatible values (`object`, `array`, `number`, `boolean`, `null`) | `JSON.stringify` → UTF-8 bytes    | `application/json`         |
 
 Unsupported types (`function`, `symbol`, `undefined`) throw `FerrumQError` with
 transport `"sdk"`. Circular references that fail `JSON.stringify` are wrapped as
 SDK errors.
+
+Consumed `payload` fields are `Uint8Array` instances — the SDK copies protocol-owned
+buffers so callers cannot alias mutable transport memory. Callers that require a
+Node.js `Buffer` (e.g. for `.toString('utf8')` or `.slice()`) can convert with
+`Buffer.from(payload)`.
 
 When `contentType` is omitted from `PublishRequest`, the SDK derives it from the
 encoded payload. An explicit `contentType` overrides the auto-derived value.
@@ -257,6 +264,10 @@ class FerrumQError extends Error {
   readonly code?: string; // FerrumQ error code or gRPC status name
   readonly status?: number; // HTTP status code (HTTP errors only)
   readonly transport: "http" | "grpc" | "sdk";
+  readonly grpcStatus?: string;
+  readonly operation?: string;
+  readonly topic?: string;
+  readonly deliveryId?: string;
   readonly cause?: unknown; // Original error
 }
 ```
@@ -277,14 +288,15 @@ class FerrumQError extends Error {
 ### SDK Errors
 
 - `transport: "sdk"`
-- Raised for configuration validation, payload serialization failures, timeouts,
-  and calls on a closed client.
+- Stable codes include `SDK_CONFIGURATION`, `SDK_SERIALIZATION`,
+  `SDK_TIMEOUT`, `SDK_CLIENT_CLOSED`, and `SDK_INVALID_RESPONSE`.
 
 ## Timeouts
 
-When `timeoutMs` is set, every operation is bounded by a `Promise.race` with a
-rejecting timeout. Timeout rejections are `FerrumQError` with transport `"sdk"`
-and a message indicating the timeout duration.
+When `timeoutMs` is set, HTTP operations use `AbortController` and gRPC unary
+operations use grpc-js deadlines. Timers and controllers are removed when an
+operation settles. A timeout or `close()` cancellation stops client-side work,
+but cannot guarantee rollback if the broker already accepted a mutation.
 
 Automatic retries are not implemented. Retries without an idempotency policy can
 duplicate non-idempotent operations such as publish. Callers remain responsible
@@ -297,8 +309,10 @@ await client.close();
 ```
 
 - Closes the gRPC channel.
+- Aborts unsettled HTTP operations and cancels active unary gRPC calls.
 - Marks the client as closed.
-- Subsequent operations reject with `FerrumQError`.
+- Unsettled and subsequent operations reject with
+  `code: "SDK_CLIENT_CLOSED"`.
 - `close()` is idempotent.
 
 ## Examples
@@ -317,6 +331,7 @@ tsx examples/basic-flow.ts
 
 Requires `brokerd serve-all` running on `http://127.0.0.1:8080` and gRPC on
 `http://127.0.0.1:9090`.
+`pnpm run examples:typecheck` verifies all examples during CI.
 
 ## Node.js Support
 

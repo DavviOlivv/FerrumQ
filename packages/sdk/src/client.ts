@@ -1,29 +1,31 @@
 import { randomUUID } from "node:crypto";
 import {
+  type BrokerStatusResponse,
+  type ControlPlaneClient,
   ControlPlaneRequestError,
   createControlPlaneClient,
   createGrpcDataPlaneClient,
-  type BrokerStatusResponse,
-  type ControlPlaneClient,
   type DataPlaneClient,
   type DlqEntryResponse,
+  type GrpcDataPlaneClientOptions,
+  grpcStatusName,
   type HttpStatusResponse,
   type TopicResponse,
 } from "@ferrumq/protocol";
-import { validateOptions, type FerrumQClientOptions } from "./config.js";
+import { type FerrumQClientOptions, validateOptions } from "./config.js";
 import { encodePayload } from "./encoding.js";
 import { FerrumQError } from "./errors.js";
 
 export type {
   BrokerStatusResponse as BrokerStatus,
   DlqEntryResponse as DlqEntry,
+  GrpcDataPlaneClientOptions,
   HttpStatusResponse as HealthStatus,
   TopicResponse as Topic,
 } from "@ferrumq/protocol";
-
 export type { FerrumQClientOptions } from "./config.js";
-export { FerrumQError } from "./errors.js";
 export type { FerrumQTransport } from "./errors.js";
+export { FerrumQError } from "./errors.js";
 
 export interface CreateTopicRequest {
   name: string;
@@ -101,16 +103,23 @@ export class FerrumQClient {
   private readonly grpcUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly grpcClientOptions: GrpcDataPlaneClientOptions;
   private readonly controlPlane: ControlPlaneClient;
   private dataPlane: DataPlaneClient | null = null;
+  private readonly activeHttpControllers = new Set<AbortController>();
   private closed = false;
 
-  constructor(options: FerrumQClientOptions) {
+  constructor(
+    options: FerrumQClientOptions & {
+      grpcClientOptions?: GrpcDataPlaneClientOptions;
+    },
+  ) {
     const validated = validateOptions(options);
     this.httpUrl = validated.httpUrl;
     this.grpcUrl = validated.grpcUrl;
     this.timeoutMs = validated.timeoutMs;
     this.fetchImpl = validated.fetchImpl;
+    this.grpcClientOptions = options.grpcClientOptions ?? {};
     this.controlPlane = createControlPlaneClient(
       this.httpUrl,
       this.fetchImpl as import("@ferrumq/protocol").FetchLike,
@@ -119,43 +128,60 @@ export class FerrumQClient {
 
   async health(): Promise<HttpStatusResponse> {
     this.checkClosed();
-    return this.executeControl(() => this.controlPlane.health());
+    return this.executeControl("health", (signal) =>
+      this.controlPlane.health({ signal }),
+    );
   }
 
   async readiness(): Promise<HttpStatusResponse> {
     this.checkClosed();
-    return this.executeControl(() => this.controlPlane.ready());
+    return this.executeControl("readiness", (signal) =>
+      this.controlPlane.ready({ signal }),
+    );
   }
 
   async status(): Promise<BrokerStatusResponse> {
     this.checkClosed();
-    return this.executeControl(() => this.controlPlane.status());
+    return this.executeControl("status", (signal) =>
+      this.controlPlane.status({ signal }),
+    );
   }
 
   async createTopic(request: CreateTopicRequest): Promise<TopicResponse> {
     this.checkClosed();
-    return this.executeControl(() =>
-      this.controlPlane.createTopic(request.name, request.partitions),
+    return this.executeControl(
+      "createTopic",
+      (signal) =>
+        this.controlPlane.createTopic(request.name, request.partitions, {
+          signal,
+        }),
+      { topic: request.name },
     );
   }
 
   async listTopics(): Promise<TopicResponse[]> {
     this.checkClosed();
-    const response = await this.executeControl(() =>
-      this.controlPlane.listTopics(),
+    const response = await this.executeControl("listTopics", (signal) =>
+      this.controlPlane.listTopics({ signal }),
     );
     return response.items;
   }
 
   async getTopic(name: string): Promise<TopicResponse> {
     this.checkClosed();
-    return this.executeControl(() => this.controlPlane.getTopic(name));
+    return this.executeControl(
+      "getTopic",
+      (signal) => this.controlPlane.getTopic(name, { signal }),
+      { topic: name },
+    );
   }
 
   async listDlq(topic?: string): Promise<DlqEntryResponse[]> {
     this.checkClosed();
-    const response = await this.executeControl(() =>
-      this.controlPlane.listDlq(topic),
+    const response = await this.executeControl(
+      "listDlq",
+      (signal) => this.controlPlane.listDlq(topic, { signal }),
+      topic === undefined ? undefined : { topic },
     );
     return response.items;
   }
@@ -163,31 +189,66 @@ export class FerrumQClient {
   async metrics(): Promise<string> {
     this.checkClosed();
     const url = new URL("/metrics", `${this.httpUrl}/`).toString();
-
-    try {
-      const response = await this.withTimeout(
-        this.fetchImpl(url).then((res) => {
-          if (!res.ok) {
-            throw new Error(
-              `HTTP ${res.status}: ${res.statusText || "request failed"}`,
-            );
-          }
-          return res.text();
-        }),
-      );
-      return response;
-    } catch (error) {
-      if (error instanceof FerrumQError) throw error;
+    return this.executeHttp("metrics", async (signal) => {
+      const response = await this.fetchImpl(url, { signal });
+      if (!response.ok) {
+        throw new FerrumQError(
+          `HTTP ${response.status}: ${response.statusText || "request failed"}`,
+          {
+            transport: "http",
+            status: response.status,
+            operation: "metrics",
+          },
+        );
+      }
+      try {
+        return await response.text();
+      } catch (error) {
+        throw new FerrumQError(
+          `HTTP response failed for metrics: ${errorMessage(error)}`,
+          {
+            transport: "http",
+            code: "SDK_INVALID_RESPONSE",
+            operation: "metrics",
+            cause: error,
+          },
+        );
+      }
+    }).catch((error) => {
+      if (error instanceof FerrumQError) {
+        throw error;
+      }
       throw new FerrumQError(
         `HTTP request failed for metrics: ${errorMessage(error)}`,
-        { transport: "http", cause: error },
+        {
+          transport: "http",
+          operation: "metrics",
+          cause: error,
+        },
       );
-    }
+    });
   }
 
   async publish(request: PublishRequest): Promise<PublishResult> {
     this.checkClosed();
-    const encoded = encodePayload(request.payload);
+    let encoded: ReturnType<typeof encodePayload>;
+    try {
+      encoded = encodePayload(request.payload);
+    } catch (error) {
+      if (error instanceof FerrumQError) {
+        throw error;
+      }
+      throw new FerrumQError(
+        `Failed to serialize payload for publish: ${errorMessage(error)}`,
+        {
+          transport: "sdk",
+          code: "SDK_SERIALIZATION",
+          operation: "publish",
+          topic: request.topic,
+          cause: error,
+        },
+      );
+    }
     const messageId = nonEmpty(request.messageId) ?? randomUUID();
     const timeUnixMs = request.timeUnixMs ?? Date.now();
     const contentType = nonEmpty(request.contentType) ?? encoded.contentType;
@@ -195,8 +256,8 @@ export class FerrumQClient {
     const source = nonEmpty(request.source) ?? DEFAULT_PUBLISH_SOURCE;
 
     try {
-      const response = await this.withTimeout(
-        this.getDataPlane().publish({
+      const response = await this.getDataPlane().publish(
+        {
           topic: request.topic,
           messageId,
           key: request.key ?? "",
@@ -207,7 +268,8 @@ export class FerrumQClient {
           subject: request.subject ?? "",
           idempotencyKey: request.idempotencyKey ?? "",
           timeUnixMs: String(timeUnixMs),
-        }),
+        },
+        this.grpcCallOptions(),
       );
 
       return {
@@ -217,7 +279,7 @@ export class FerrumQClient {
         messageId: response.messageId,
       };
     } catch (error) {
-      throw this.wrapGrpcError(error);
+      throw this.wrapGrpcError(error, "publish", { topic: request.topic });
     }
   }
 
@@ -229,15 +291,16 @@ export class FerrumQClient {
     const nowUnixMs = Date.now();
 
     try {
-      const response = await this.withTimeout(
-        this.getDataPlane().consume({
+      const response = await this.getDataPlane().consume(
+        {
           topic: request.topic,
           consumerGroup: request.group,
           consumerId,
           maxMessages,
           leaseMs: String(leaseMs),
           nowUnixMs: String(nowUnixMs),
-        }),
+        },
+        this.grpcCallOptions(),
       );
 
       return response.messages.map(
@@ -248,7 +311,7 @@ export class FerrumQClient {
           offset: message.offset,
           messageId: message.messageId,
           key: message.key.length > 0 ? message.key : null,
-          payload: message.payload,
+          payload: new Uint8Array(message.payload),
           contentType: message.contentType,
           type: message.type,
           source: message.source,
@@ -264,7 +327,7 @@ export class FerrumQClient {
         }),
       );
     } catch (error) {
-      throw this.wrapGrpcError(error);
+      throw this.wrapGrpcError(error, "consume", { topic: request.topic });
     }
   }
 
@@ -273,14 +336,17 @@ export class FerrumQClient {
     const consumerId = nonEmpty(request.consumerId) ?? DEFAULT_CONSUMER_ID;
 
     try {
-      await this.withTimeout(
-        this.getDataPlane().ack({
+      await this.getDataPlane().ack(
+        {
           deliveryId: request.deliveryId,
           consumerId,
-        }),
+        },
+        this.grpcCallOptions(),
       );
     } catch (error) {
-      throw this.wrapGrpcError(error);
+      throw this.wrapGrpcError(error, "ack", {
+        deliveryId: request.deliveryId,
+      });
     }
   }
 
@@ -289,15 +355,18 @@ export class FerrumQClient {
     const consumerId = nonEmpty(request.consumerId) ?? DEFAULT_CONSUMER_ID;
 
     try {
-      await this.withTimeout(
-        this.getDataPlane().nack({
+      await this.getDataPlane().nack(
+        {
           deliveryId: request.deliveryId,
           consumerId,
           reason: request.reason ?? "",
-        }),
+        },
+        this.grpcCallOptions(),
       );
     } catch (error) {
-      throw this.wrapGrpcError(error);
+      throw this.wrapGrpcError(error, "nack", {
+        deliveryId: request.deliveryId,
+      });
     }
   }
 
@@ -306,6 +375,10 @@ export class FerrumQClient {
       return;
     }
     this.closed = true;
+    for (const controller of this.activeHttpControllers) {
+      controller.abort();
+    }
+    this.activeHttpControllers.clear();
     if (this.dataPlane !== null) {
       this.dataPlane.close();
       this.dataPlane = null;
@@ -314,68 +387,104 @@ export class FerrumQClient {
 
   private getDataPlane(): DataPlaneClient {
     if (this.dataPlane === null) {
-      this.dataPlane = createGrpcDataPlaneClient(this.grpcUrl);
+      try {
+        this.dataPlane = createGrpcDataPlaneClient(
+          this.grpcUrl,
+          this.grpcClientOptions,
+        );
+      } catch (error) {
+        throw new FerrumQError(
+          `Failed to initialize gRPC client: ${errorMessage(error)}`,
+          {
+            transport: "grpc",
+            code: "SDK_CONFIGURATION",
+            operation: "initializeGrpc",
+            cause: error,
+          },
+        );
+      }
     }
     return this.dataPlane;
   }
 
-  private executeControl<T>(fn: () => Promise<T>): Promise<T> {
-    return this.withTimeout(fn()).catch((error) => {
-      if (error instanceof ControlPlaneRequestError) {
-        const options: {
-          code?: string;
-          status?: number;
-          transport: "http";
-          cause: unknown;
-        } = {
-          transport: "http",
-          cause: error,
-        };
-        if (error.ferrumqError?.code !== undefined) {
-          options.code = error.ferrumqError.code;
-        }
-        if (error.status !== undefined) {
-          options.status = error.status;
-        }
-        throw new FerrumQError(error.message, options);
+  private executeControl<T>(
+    operation: string,
+    fn: (signal: AbortSignal) => Promise<T>,
+    context?: ErrorContext,
+  ): Promise<T> {
+    return this.executeHttp(operation, fn, context).catch((error) => {
+      if (error instanceof FerrumQError) {
+        throw error;
       }
-      throw error;
+      if (error instanceof ControlPlaneRequestError) {
+        throw this.wrapControlError(error, operation, context);
+      }
+      throw new FerrumQError(
+        `HTTP request failed for ${operation}: ${errorMessage(error)}`,
+        {
+          transport: "http",
+          operation,
+          ...context,
+          cause: error,
+        },
+      );
     });
   }
 
   private checkClosed(): void {
     if (this.closed) {
-      throw new FerrumQError("Client is closed", { transport: "sdk" });
+      throw this.closedError();
     }
   }
 
-  private withTimeout<T>(promise: Promise<T>): Promise<T> {
-    if (this.timeoutMs <= 0) {
-      return promise;
-    }
-
+  private executeHttp<T>(
+    operation: string,
+    fn: (signal: AbortSignal) => Promise<T>,
+    context?: ErrorContext,
+  ): Promise<T> {
+    const controller = new AbortController();
+    this.activeHttpControllers.add(controller);
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(
-          new FerrumQError(`Request timed out after ${this.timeoutMs}ms`, {
-            transport: "sdk",
-          }),
-        );
-      }, this.timeoutMs);
-
-      promise
-        .then((result) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timer !== undefined) {
           clearTimeout(timer);
-          resolve(result);
-        })
-        .catch((error) => {
-          clearTimeout(timer);
-          reject(error);
+        }
+        controller.signal.removeEventListener("abort", onAbort);
+        this.activeHttpControllers.delete(controller);
+        callback();
+      };
+      const onAbort = () =>
+        finish(() => {
+          reject(
+            this.closed
+              ? this.closedError(operation, context)
+              : this.timeoutError(operation, context),
+          );
         });
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      const timer =
+        this.timeoutMs > 0
+          ? setTimeout(() => controller.abort(), this.timeoutMs)
+          : undefined;
+      Promise.resolve()
+        .then(() => fn(controller.signal))
+        .then(
+          (value) => finish(() => resolve(value)),
+          (error) => finish(() => reject(error)),
+        );
     });
   }
 
-  private wrapGrpcError(error: unknown): never {
+  private wrapGrpcError(
+    error: unknown,
+    operation: string,
+    context?: ErrorContext,
+  ): never {
     if (error instanceof FerrumQError) {
       throw error;
     }
@@ -386,9 +495,9 @@ export class FerrumQClient {
       message?: unknown;
     };
 
-    const code =
+    const grpcStatus =
       typeof candidate.code === "number"
-        ? gRPCCodeToString(candidate.code)
+        ? grpcStatusName(candidate.code)
         : undefined;
 
     const message =
@@ -398,20 +507,100 @@ export class FerrumQClient {
           ? candidate.message
           : "gRPC request failed";
 
-    const errorOptions: {
-      code?: string;
-      transport: "grpc";
-      cause: unknown;
-    } = {
-      transport: "grpc",
-      cause: error,
-    };
-    if (code !== undefined) {
-      errorOptions.code = code;
+    if (this.closed && grpcStatus === "CANCELLED") {
+      throw this.closedError(operation, context, error);
+    }
+    if (grpcStatus === "DEADLINE_EXCEEDED") {
+      throw this.timeoutError(operation, context, error, grpcStatus);
     }
 
-    throw new FerrumQError(`gRPC request failed: ${message}`, errorOptions);
+    const options: ConstructorParameters<typeof FerrumQError>[1] = {
+      transport: "grpc",
+      code: grpcStatus ?? "SDK_INVALID_RESPONSE",
+      operation,
+      ...context,
+      cause: error,
+    };
+    if (grpcStatus !== undefined) {
+      options.grpcStatus = grpcStatus;
+    }
+    throw new FerrumQError(`gRPC request failed: ${message}`, options);
   }
+
+  private grpcCallOptions(): { deadline?: number } {
+    return this.timeoutMs > 0 ? { deadline: Date.now() + this.timeoutMs } : {};
+  }
+
+  private wrapControlError(
+    error: ControlPlaneRequestError,
+    operation: string,
+    context?: ErrorContext,
+  ): FerrumQError {
+    const invalidResponse =
+      error.kind === "invalid-json" ||
+      error.kind === "schema" ||
+      error.kind === "malformed-error";
+    const options: ConstructorParameters<typeof FerrumQError>[1] = {
+      transport: "http",
+      operation,
+      ...context,
+      cause: error,
+    };
+    const code =
+      error.ferrumqError?.code ??
+      (invalidResponse ? "SDK_INVALID_RESPONSE" : undefined);
+    if (code !== undefined) {
+      options.code = code;
+    }
+    if (error.status !== undefined) {
+      options.status = error.status;
+    }
+    return new FerrumQError(error.message, options);
+  }
+
+  private timeoutError(
+    operation: string,
+    context?: ErrorContext,
+    cause?: unknown,
+    grpcStatus?: string,
+  ): FerrumQError {
+    const options: ConstructorParameters<typeof FerrumQError>[1] = {
+      transport: "sdk",
+      code: "SDK_TIMEOUT",
+      operation,
+      ...context,
+      cause,
+    };
+    if (grpcStatus !== undefined) {
+      options.grpcStatus = grpcStatus;
+    }
+    return new FerrumQError(
+      `Operation ${operation} timed out after ${this.timeoutMs}ms`,
+      options,
+    );
+  }
+
+  private closedError(
+    operation?: string,
+    context?: ErrorContext,
+    cause?: unknown,
+  ): FerrumQError {
+    const options: ConstructorParameters<typeof FerrumQError>[1] = {
+      transport: "sdk",
+      code: "SDK_CLIENT_CLOSED",
+      ...context,
+      cause,
+    };
+    if (operation !== undefined) {
+      options.operation = operation;
+    }
+    return new FerrumQError("Client is closed", options);
+  }
+}
+
+interface ErrorContext {
+  topic?: string;
+  deliveryId?: string;
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -419,29 +608,6 @@ function nonEmpty(value: string | undefined): string | undefined {
     return undefined;
   }
   return value;
-}
-
-function gRPCCodeToString(code: number): string {
-  const names: Record<number, string> = {
-    0: "OK",
-    1: "CANCELLED",
-    2: "UNKNOWN",
-    3: "INVALID_ARGUMENT",
-    4: "DEADLINE_EXCEEDED",
-    5: "NOT_FOUND",
-    6: "ALREADY_EXISTS",
-    7: "PERMISSION_DENIED",
-    8: "RESOURCE_EXHAUSTED",
-    9: "FAILED_PRECONDITION",
-    10: "ABORTED",
-    11: "OUT_OF_RANGE",
-    12: "UNIMPLEMENTED",
-    13: "INTERNAL",
-    14: "UNAVAILABLE",
-    15: "DATA_LOSS",
-    16: "UNAUTHENTICATED",
-  };
-  return names[code] ?? "UNKNOWN";
 }
 
 function errorMessage(error: unknown): string {

@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
-    "test": "vitest run",
+    "test": "pnpm run build && (test -x ../../target/debug/brokerd || cargo build --manifest-path ../../Cargo.toml -p msg-runtime --bin brokerd) && vitest run",
     "typecheck": "pnpm --filter @ferrumq/protocol run build && tsc --noEmit"
   },
   "dependencies": {

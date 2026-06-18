@@ -121,7 +121,10 @@ tsx examples/status-metrics.ts
 
 These run the basic publish/consume/ACK flow, NACK/DLQ inspection, and status
 and metrics retrieval through `@ferrumq/sdk`. See [docs/SDK.md](SDK.md) for
-the full SDK reference.
+the full SDK reference. Topic-creating examples use run-unique names by default;
+set `FERRUMQ_EXAMPLE_TOPIC` to choose a fixed name. Run
+`pnpm run examples:typecheck` to verify all example sources without executing
+them.
 
 ## Split-Process Compatibility
 

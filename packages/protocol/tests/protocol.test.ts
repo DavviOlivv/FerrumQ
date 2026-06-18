@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -9,6 +9,7 @@ import {
   ControlPlaneRequestError,
   createControlPlaneClient,
   createGrpcDataPlaneClient,
+  defaultDataPlaneProtoPath,
   dlqListResponseSchema,
   ferrumQErrorEnvelopeSchema,
   formatGrpcError,
@@ -370,6 +371,22 @@ describe("HTTP control-plane client", () => {
       ControlPlaneRequestError,
     );
   });
+
+  it("passes AbortSignal to fetch", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<FetchLike>(async (_input, init) => {
+      expect(init?.signal).toBe(controller.signal);
+      return response(200, { status: "ok" });
+    });
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      fetchImpl,
+    );
+
+    await expect(client.health({ signal: controller.signal })).resolves.toEqual(
+      { status: "ok" },
+    );
+  });
 });
 
 describe("gRPC URL helpers", () => {
@@ -427,6 +444,63 @@ describe("gRPC status formatting", () => {
 });
 
 describe("gRPC client helpers", () => {
+  it("resolves the packaged or source-tree proto", () => {
+    expect(existsSync(defaultDataPlaneProtoPath())).toBe(true);
+  });
+
+  it("passes deadlines, cancels active calls, and ignores late callbacks", async () => {
+    let callback: ((error: null, response: unknown) => void) | undefined;
+    const cancel = vi.fn();
+    const close = vi.fn();
+    const client = createGrpcDataPlaneClient("http://broker.local:19090", {
+      protoPath: "/tmp/dataplane.proto",
+      createRawClient() {
+        return {
+          close,
+          publish(
+            _request: unknown,
+            options: { deadline?: number },
+            rawCallback: (error: null, response: unknown) => void,
+          ) {
+            expect(options.deadline).toBe(1_700_000_000_000);
+            callback = rawCallback;
+            return { cancel };
+          },
+        };
+      },
+    });
+
+    const pending = client.publish(
+      {
+        topic: "orders",
+        messageId: "message-1",
+        payload: Buffer.from("hello"),
+        contentType: "text/plain",
+        type: "example",
+        source: "test",
+        timeUnixMs: "1700000000000",
+      },
+      { deadline: 1_700_000_000_000 },
+    );
+    client.close();
+    client.close();
+
+    await expect(pending).rejects.toMatchObject({
+      code: 1,
+      details: "gRPC client is closed",
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(() =>
+      callback?.(null, {
+        topic: "orders",
+        partition: 0,
+        offset: "1",
+        messageId: "message-1",
+      }),
+    ).not.toThrow();
+  });
+
   it("maps publish requests and preserves decimal uint64 responses", async () => {
     const calls: unknown[] = [];
     const client = createGrpcDataPlaneClient("http://broker.local:19090", {
@@ -437,6 +511,7 @@ describe("gRPC client helpers", () => {
         return {
           publish(
             request: unknown,
+            _options: unknown,
             callback: (error: null, response: unknown) => void,
           ) {
             calls.push(request);
@@ -492,6 +567,7 @@ describe("gRPC client helpers", () => {
         return {
           consume(
             request: unknown,
+            _options: unknown,
             callback: (error: null, response: unknown) => void,
           ) {
             calls.push({ method: "consume", request });
@@ -522,6 +598,7 @@ describe("gRPC client helpers", () => {
           },
           ack(
             request: unknown,
+            _options: unknown,
             callback: (error: null, response: unknown) => void,
           ) {
             calls.push({ method: "ack", request });
@@ -529,6 +606,7 @@ describe("gRPC client helpers", () => {
           },
           nack(
             request: unknown,
+            _options: unknown,
             callback: (error: null, response: unknown) => void,
           ) {
             calls.push({ method: "nack", request });
@@ -664,6 +742,7 @@ describe("gRPC client helpers", () => {
           return {
             publish(
               _request: unknown,
+              _options: unknown,
               callback: (error: null, response: unknown) => void,
             ) {
               callback(null, {
@@ -697,6 +776,7 @@ describe("gRPC client helpers", () => {
           return {
             consume(
               _request: unknown,
+              _options: unknown,
               callback: (error: null, response: unknown) => void,
             ) {
               callback(null, { messages: {} });

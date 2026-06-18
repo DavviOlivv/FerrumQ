@@ -161,7 +161,7 @@ non-fatal only when the command exits successfully.
 
 ```txt
 crates/              Rust broker, storage, protocol, API, runtime, and tests
-packages/            TypeScript CLI, TUI, protocol helpers, and SDK placeholder
+packages/            TypeScript CLI, TUI, protocol helpers, and hardened SDK
 docs/                Architecture, protocol, operation, release, and API docs
 .github/workflows/   CI entrypoint that runs the local harness
 ```

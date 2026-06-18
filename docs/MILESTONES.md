@@ -364,7 +364,10 @@ Implemented scope:
   `FerrumQError` with transport `"http"`.
 - gRPC status codes are converted to string names for the `code` field.
 - `close()` is idempotent and closes the gRPC channel.
-- `timeoutMs` uses `Promise.race` for bounded operation rejection.
+- `timeoutMs` uses HTTP transport aborts and grpc-js unary deadlines.
+- Stable SDK error codes, operation/context metadata, deterministic in-flight
+  cancellation, and copied binary payload ownership.
+- Real built-package SDK integration coverage against `brokerd serve-all`.
 - `@ferrumq/protocol` `DataPlaneClient` interface extended with `close()`.
 - `@ferrumq/protocol` `FetchLike` type extended with optional `signal`.
 - Unit tests with vitest covering config validation, payload encoding,

@@ -41,9 +41,10 @@ Milestone 8 adds the first TypeScript TUI foundation under the same boundary. `@
 Milestone 12 adds the TypeScript SDK (`@ferrumq/sdk`) as a reusable typed client
 that wraps the HTTP control plane and gRPC data plane into a single coherent API.
 It reuses `@ferrumq/protocol` for transport and protocol-level contracts while
-adding payload encoding, error normalization into `FerrumQError`, timeout
-support, and lifecycle management. The SDK is a pure client layer and does not
-own broker semantics.
+adding copied payload encoding, stable error normalization into
+`FerrumQError`, HTTP aborts, gRPC deadlines, and deterministic lifecycle
+management. The SDK is a Node.js-only, unary client layer and does not own
+broker semantics or automatic retries.
 
 Milestone 9 adds observability without moving broker semantics into tooling.
 `msg-observability` is a shared Rust helper crate for `tracing` setup, stable

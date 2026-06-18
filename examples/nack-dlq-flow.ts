@@ -1,7 +1,10 @@
-import { FerrumQClient, type Topic } from "@ferrumq/sdk";
+import { FerrumQClient, FerrumQError, type Topic } from "@ferrumq/sdk";
 
 const HTTP_URL = process.env.FERRUMQ_HTTP_URL ?? "http://127.0.0.1:8080";
 const GRPC_URL = process.env.FERRUMQ_GRPC_URL ?? "http://127.0.0.1:9090";
+const TOPIC =
+  process.env.FERRUMQ_EXAMPLE_TOPIC ??
+  `orders-nack-${process.pid}-${Date.now()}`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,10 +20,12 @@ async function main() {
   try {
     let topic: Topic | undefined;
     try {
-      topic = await client.createTopic({ name: "orders", partitions: 1 });
+      topic = await client.createTopic({ name: TOPIC, partitions: 1 });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("TOPIC_ALREADY_EXISTS") || message.includes("409")) {
+      if (
+        error instanceof FerrumQError &&
+        (error.code === "TOPIC_ALREADY_EXISTS" || error.status === 409)
+      ) {
         console.log("topic already exists, continuing");
       } else {
         throw error;
@@ -32,7 +37,7 @@ async function main() {
 
     console.log("--- publish ---");
     const published = await client.publish({
-      topic: "orders",
+      topic: TOPIC,
       payload: { orderId: 2, status: "reject" },
     });
     console.log("published:", published);
@@ -40,12 +45,7 @@ async function main() {
     const maxNacks = 3;
     for (let i = 0; i < maxNacks; i++) {
       console.log(`--- consume (attempt ${i + 1}) ---`);
-      const deliveries = await client.consume({
-        topic: "orders",
-        group: "workers",
-        consumerId: "worker-1",
-        maxMessages: 1,
-      });
+      const deliveries = await pollForDelivery(client);
 
       const [delivery] = deliveries;
       if (delivery === undefined) {
@@ -70,7 +70,7 @@ async function main() {
     }
 
     console.log("--- dlq inspection ---");
-    const dlqEntries = await client.listDlq("orders");
+    const dlqEntries = await pollForDlq(client);
     if (dlqEntries.length === 0) {
       console.log("no DLQ entries yet (message may still be retrying)");
     } else {
@@ -90,6 +90,33 @@ async function main() {
   } finally {
     client.close();
   }
+}
+
+async function pollForDelivery(client: FerrumQClient) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const deliveries = await client.consume({
+      topic: TOPIC,
+      group: "workers",
+      consumerId: "worker-1",
+      maxMessages: 1,
+    });
+    if (deliveries.length > 0) {
+      return deliveries;
+    }
+    await sleep(100);
+  }
+  return [];
+}
+
+async function pollForDlq(client: FerrumQClient) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const entries = await client.listDlq(TOPIC);
+    if (entries.length > 0) {
+      return entries;
+    }
+    await sleep(100);
+  }
+  return [];
 }
 
 main().catch((error) => {

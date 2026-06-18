@@ -8,6 +8,18 @@ import {
 } from "../src/index.js";
 
 describe("validateOptions", () => {
+  it("normalizes missing options", () => {
+    expect(() =>
+      validateOptions(
+        undefined as unknown as Parameters<typeof validateOptions>[0],
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: "SDK_CONFIGURATION",
+      }),
+    );
+  });
+
   it("accepts valid options", () => {
     const result = validateOptions({
       httpUrl: "http://127.0.0.1:8080",
@@ -116,15 +128,16 @@ describe("validateOptions", () => {
     ).toThrow(FerrumQError);
   });
 
-  it("rejects non-positive timeoutMs", () => {
-    expect(() =>
-      validateOptions({
-        httpUrl: "http://127.0.0.1:8080",
-        grpcUrl: "http://127.0.0.1:9090",
-        timeoutMs: 0,
-      }),
-    ).toThrow(FerrumQError);
+  it("accepts timeoutMs 0 as no timeout", () => {
+    const result = validateOptions({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      timeoutMs: 0,
+    });
+    expect(result.timeoutMs).toBe(0);
+  });
 
+  it("rejects negative timeoutMs", () => {
     expect(() =>
       validateOptions({
         httpUrl: "http://127.0.0.1:8080",
@@ -142,6 +155,24 @@ describe("validateOptions", () => {
         timeoutMs: 1.5,
       }),
     ).toThrow(FerrumQError);
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    2_147_483_648,
+  ])("rejects unsafe timeoutMs %s", (timeoutMs) => {
+    expect(() =>
+      validateOptions({
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        timeoutMs,
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "SDK_CONFIGURATION",
+      }),
+    );
   });
 });
 
@@ -164,18 +195,22 @@ describe("encodePayload", () => {
     expect(new TextDecoder().decode(result.data)).toBe("héllo 🌍");
   });
 
-  it("encodes Uint8Array as-is", () => {
+  it("copies Uint8Array payloads", () => {
     const data = new Uint8Array([0x01, 0x02, 0x03]);
     const result = encodePayload(data);
     expect(result.contentType).toBe("application/octet-stream");
-    expect(result.data).toBe(data);
+    expect(result.data).toStrictEqual(data);
+    expect(result.data).not.toBe(data);
+    data[0] = 0xff;
+    expect(result.data[0]).toBe(0x01);
   });
 
-  it("encodes Buffer as binary", () => {
+  it("copies Buffer payloads as Uint8Array", () => {
     const data = Buffer.from([0x01, 0x02, 0x03]);
     const result = encodePayload(data);
     expect(result.contentType).toBe("application/octet-stream");
-    expect(result.data).toBe(data);
+    expect(result.data).toStrictEqual(new Uint8Array([0x01, 0x02, 0x03]));
+    expect(result.data).not.toBe(data);
   });
 
   it("encodes plain objects as JSON", () => {
@@ -513,27 +548,47 @@ describe("FerrumQClient HTTP methods", () => {
     client.close();
   });
 
+  it("normalizes metrics network failures", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      fetchImpl: vi
+        .fn()
+        .mockRejectedValue(
+          new TypeError("connection refused"),
+        ) as unknown as typeof fetch,
+    });
+
+    await expect(client.metrics()).rejects.toMatchObject({
+      operation: "metrics",
+      transport: "http",
+    });
+    await expect(client.metrics()).rejects.toBeInstanceOf(FerrumQError);
+    client.close();
+  });
+
   it("timeout rejects with SDK error", async () => {
+    let observedSignal: AbortSignal | undefined;
     const client = new FerrumQClient({
       httpUrl: "http://127.0.0.1:8080",
       grpcUrl: "http://127.0.0.1:9090",
       timeoutMs: 50,
-      fetchImpl: vi.fn().mockImplementation(
-        () =>
-          new Promise((resolve) =>
-            setTimeout(
-              () =>
-                resolve({
-                  ok: true,
-                  status: 200,
-                  statusText: "OK",
-                  json: () => Promise.resolve({ status: "ok" }),
-                  text: () => Promise.resolve(""),
-                }),
-              200,
-            ),
+      fetchImpl: vi.fn().mockImplementation((_input, init) => {
+        observedSignal = init?.signal;
+        return new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                ok: true,
+                status: 200,
+                statusText: "OK",
+                json: () => Promise.resolve({ status: "ok" }),
+                text: () => Promise.resolve(""),
+              }),
+            200,
           ),
-      ) as unknown as typeof fetch,
+        );
+      }) as unknown as typeof fetch,
     });
 
     await expect(client.health()).rejects.toThrow(FerrumQError);
@@ -544,10 +599,276 @@ describe("FerrumQClient HTTP methods", () => {
       expect(error).toBeInstanceOf(FerrumQError);
       const fe = error as FerrumQError;
       expect(fe.transport).toBe("sdk");
+      expect(fe.code).toBe("SDK_TIMEOUT");
+      expect(fe.operation).toBe("health");
       expect(fe.message).toContain("timed out");
+    }
+    expect(observedSignal?.aborted).toBe(true);
+
+    client.close();
+  });
+
+  it("close aborts in-flight HTTP work with a stable closed error", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      fetchImpl: vi.fn().mockImplementation((_input, init) => {
+        observedSignal = init?.signal;
+        return new Promise(() => {});
+      }) as unknown as typeof fetch,
+    });
+
+    const pending = client.health();
+    await Promise.resolve();
+    client.close();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "SDK_CLIENT_CLOSED",
+      operation: "health",
+      transport: "sdk",
+    });
+    expect(observedSignal?.aborted).toBe(true);
+  });
+});
+
+describe("FerrumQClient publish error wrapping", () => {
+  it("preserves existing FerrumQError from serialization without double-wrapping", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+    });
+
+    try {
+      await client.publish({
+        topic: "orders",
+        payload: Symbol("test"),
+      });
+    } catch (error) {
+      expect(error).toBeInstanceOf(FerrumQError);
+      const fe = error as FerrumQError;
+      expect(fe.transport).toBe("sdk");
+      expect(fe.code).toBe("SDK_SERIALIZATION");
+      expect(fe.cause).toBeUndefined();
     }
 
     client.close();
+  });
+
+  it("preserves serialization errors with their original cause chain", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+    });
+
+    try {
+      await client.publish({
+        topic: "orders",
+        payload: { nested: { value: 1n } },
+      });
+    } catch (error) {
+      expect(error).toBeInstanceOf(FerrumQError);
+      const fe = error as FerrumQError;
+      expect(fe.transport).toBe("sdk");
+      expect(fe.code).toBe("SDK_SERIALIZATION");
+      expect(fe.cause).toBeInstanceOf(TypeError);
+    }
+
+    client.close();
+  });
+});
+
+describe("FerrumQClient consumed payload", () => {
+  it("returns Uint8Array payloads that are independent copies", async () => {
+    const originalPayload = Buffer.from([0x01, 0x02, 0x03]);
+    let capturedPayload: Buffer | undefined;
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            consume(
+              _request: unknown,
+              _options: unknown,
+              callback: (error: null, response: unknown) => void,
+            ) {
+              capturedPayload = Buffer.from(originalPayload);
+              callback(null, {
+                messages: [
+                  {
+                    deliveryId: "del-1",
+                    topic: "orders",
+                    partition: 0,
+                    offset: "1",
+                    messageId: "msg-1",
+                    key: "key-1",
+                    payload: capturedPayload,
+                    contentType: "application/octet-stream",
+                    type: "test",
+                    source: "test",
+                    subject: "",
+                    idempotencyKey: "",
+                    timeUnixMs: "1700000000000",
+                    consumerGroup: "workers",
+                    consumerId: "worker-1",
+                    attemptNumber: 1,
+                    deliveredAtUnixMs: "1700000000000",
+                    leaseExpiresAtUnixMs: "1700000030000",
+                  },
+                ],
+              });
+            },
+          };
+        },
+      },
+    });
+
+    const deliveries = await client.consume({
+      topic: "orders",
+      group: "workers",
+    });
+    expect(deliveries).toHaveLength(1);
+    const [delivery] = deliveries;
+    expect(delivery).toBeDefined();
+    if (!delivery) throw new Error("unexpected empty delivery");
+    const payload = delivery.payload;
+    expect(payload).toBeInstanceOf(Uint8Array);
+    expect(Buffer.isBuffer(payload)).toBe(false);
+    expect(payload).toStrictEqual(new Uint8Array([0x01, 0x02, 0x03]));
+
+    originalPayload[0] = 0xff;
+    expect(payload[0]).toBe(0x01);
+
+    if (capturedPayload) {
+      capturedPayload[0] = 0xff;
+    }
+    expect(payload[0]).toBe(0x01);
+
+    client.close();
+  });
+});
+
+describe("FerrumQClient gRPC close", () => {
+  it("close cancels in-flight publish", async () => {
+    const cancel = vi.fn();
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            publish(_request: unknown, _options: unknown, _callback: unknown) {
+              return { cancel };
+            },
+          };
+        },
+      },
+    });
+
+    const pending = client.publish({
+      topic: "orders",
+      payload: "hello",
+    });
+    await Promise.resolve();
+    client.close();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "SDK_CLIENT_CLOSED",
+      transport: "sdk",
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("close cancels in-flight consume", async () => {
+    const cancel = vi.fn();
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            consume(_request: unknown, _options: unknown, _callback: unknown) {
+              return { cancel };
+            },
+          };
+        },
+      },
+    });
+
+    const pending = client.consume({ topic: "orders", group: "workers" });
+    await Promise.resolve();
+    client.close();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "SDK_CLIENT_CLOSED",
+      transport: "sdk",
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("close cancels in-flight ack", async () => {
+    const cancel = vi.fn();
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            ack(_request: unknown, _options: unknown, _callback: unknown) {
+              return { cancel };
+            },
+          };
+        },
+      },
+    });
+
+    const pending = client.ack({ deliveryId: "del-1" });
+    await Promise.resolve();
+    client.close();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "SDK_CLIENT_CLOSED",
+      transport: "sdk",
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("close cancels in-flight nack", async () => {
+    const cancel = vi.fn();
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            nack(_request: unknown, _options: unknown, _callback: unknown) {
+              return { cancel };
+            },
+          };
+        },
+      },
+    });
+
+    const pending = client.nack({ deliveryId: "del-1" });
+    await Promise.resolve();
+    client.close();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "SDK_CLIENT_CLOSED",
+      transport: "sdk",
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 });
 

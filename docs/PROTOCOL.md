@@ -36,8 +36,10 @@ needed by `@ferrumq/cli` and `@ferrumq/sdk`:
 - Zod schemas for HTTP control-plane success DTOs and FerrumQ error envelopes.
 - DTO types for topic, status, DLQ, and data-plane command responses.
 - `createGrpcDataPlaneClient` using `@grpc/grpc-js` and
-  `@grpc/proto-loader` against
-  `crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto`.
+  `@grpc/proto-loader` against the protobuf definition packaged in
+  `@ferrumq/protocol`, with a source-tree fallback during development.
+- Optional HTTP `AbortSignal` forwarding and grpc-js unary deadlines. Active
+  unary calls are cancelled by idempotent client cleanup.
 - `normalizeGrpcTarget`, which accepts `http://host:port` only and rejects
   credentials, missing ports, paths, queries, fragments, and HTTPS/TLS because
   auth/TLS are deferred.
@@ -47,8 +49,8 @@ Dynamic gRPC loading uses decimal strings for `uint64` response values so CLI
 JSON output does not lose precision for offsets or timestamps.
 
 TypeScript tests use mocked raw gRPC clients and proto-loading failure seams.
-Real service semantics stay covered by Rust in-process gRPC tests and the Rust
-unified-runtime integration test that binds ephemeral listeners directly.
+The SDK integration suite also imports the built package entry point and runs
+against a real `brokerd serve-all` process on reserved loopback ports.
 
 ## gRPC Data Plane
 

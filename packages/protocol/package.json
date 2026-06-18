@@ -13,7 +13,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts --format esm --dts --clean && node --input-type=commonjs -e \"const{cpSync,mkdirSync}=require('node:fs');mkdirSync('dist/proto/ferrumq/dataplane/v1',{recursive:true});cpSync('../../crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto','dist/proto/ferrumq/dataplane/v1/dataplane.proto')\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
