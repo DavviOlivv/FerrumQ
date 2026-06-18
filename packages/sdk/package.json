@@ -15,7 +15,10 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "pnpm --filter @ferrumq/protocol run build && tsc --noEmit"
+  },
+  "dependencies": {
+    "@ferrumq/protocol": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

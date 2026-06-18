@@ -38,6 +38,13 @@ Milestone 7 adds the first TypeScript CLI foundation without creating a TypeScri
 
 Milestone 8 adds the first TypeScript TUI foundation under the same boundary. `@ferrumq/tui` renders an Ink dashboard from the HTTP control plane through the shared `@ferrumq/protocol` control-plane client. It is read-only, keeps the gRPC URL as configured display state only, and does not publish, consume, ACK, NACK, supervise processes, or call the data plane.
 
+Milestone 12 adds the TypeScript SDK (`@ferrumq/sdk`) as a reusable typed client
+that wraps the HTTP control plane and gRPC data plane into a single coherent API.
+It reuses `@ferrumq/protocol` for transport and protocol-level contracts while
+adding payload encoding, error normalization into `FerrumQError`, timeout
+support, and lifecycle management. The SDK is a pure client layer and does not
+own broker semantics.
+
 Milestone 9 adds observability without moving broker semantics into tooling.
 `msg-observability` is a shared Rust helper crate for `tracing` setup, stable
 metric names, process-local counters, and Prometheus text rendering. The HTTP

@@ -591,6 +591,7 @@ describe("validation and expected failures", () => {
       consume: unreachableDataPlaneClient().consume,
       ack: unreachableDataPlaneClient().ack,
       nack: unreachableDataPlaneClient().nack,
+      close: unreachableDataPlaneClient().close,
     };
 
     const result = await captureRun(["publish", "orders", "--data", "hello"], {
@@ -972,6 +973,7 @@ function stubDataPlaneClient(): DataPlaneClient {
     },
     async ack() {},
     async nack() {},
+    close() {},
   };
 }
 
@@ -1014,6 +1016,9 @@ function unreachableDataPlaneClient(): DataPlaneClient {
     },
     async nack() {
       throw new Error("unexpected nack call");
+    },
+    close() {
+      throw new Error("unexpected close call");
     },
   };
 }

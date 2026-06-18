@@ -31,7 +31,7 @@ Initial HTTP/control plane APIs should use JSON DTOs with explicit versioning. T
 ## TypeScript Protocol Helper
 
 `@ferrumq/protocol` is not a public SDK. It exports the small contract helpers
-needed by `@ferrumq/cli`:
+needed by `@ferrumq/cli` and `@ferrumq/sdk`:
 
 - Zod schemas for HTTP control-plane success DTOs and FerrumQ error envelopes.
 - DTO types for topic, status, DLQ, and data-plane command responses.

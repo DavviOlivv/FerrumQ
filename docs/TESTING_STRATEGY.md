@@ -69,6 +69,14 @@ Use `vitest` for TypeScript unit tests and lightweight built-entrypoint smoke te
 
 Milestone 8 protocol tests cover the shared HTTP control-plane client, including endpoint-specific success mapping, FerrumQ error envelopes, malformed non-2xx bodies, network failures, invalid JSON, and schema mismatches. TUI tests cover config defaults/env/flags, URL validation, stackless CLI errors, loader success and refresh failures, dashboard/topics/DLQ/help rendering, `r`, `R`, `1`, `2`, `3`, `?`, `q`, `Q`, unsupported keyboard interactions, stale refresh protection, and built `ferrumq-tui --version` and `--help` smoke checks.
 
+Milestone 12 SDK tests cover client configuration validation, URL validation,
+payload encoding for strings, binary, and JSON values, JSON serialization
+failure wrapping, HTTP success parsing and error-envelope mapping, network
+failure handling, gRPC error mapping, timeout/deadline rejection, idempotent
+`close()`, publish with auto-generated defaults, consume with consumer ID
+defaults, ACK/NACK, and public exports. Tests mock the fetch transport and do
+not require a running broker.
+
 Process-level TypeScript gRPC integration is deferred because `brokerd
 serve-grpc --listen 127.0.0.1:0` and `brokerd serve-all --grpc-listen
 127.0.0.1:0` do not expose the selected port; Rust in-process gRPC tests and

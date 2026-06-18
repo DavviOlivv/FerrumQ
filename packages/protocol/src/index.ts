@@ -69,6 +69,7 @@ export type FetchLike = (
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    signal?: AbortSignal;
   },
 ) => Promise<ResponseLike>;
 
@@ -386,6 +387,7 @@ export interface DataPlaneClient {
   consume(request: DataPlaneConsumeRequest): Promise<DataPlaneConsumeResponse>;
   ack(request: DataPlaneAckRequest): Promise<void>;
   nack(request: DataPlaneNackRequest): Promise<void>;
+  close(): void;
 }
 
 type RawGrpcCallback = (
@@ -526,6 +528,11 @@ export function createGrpcDataPlaneClient(
         consumerId: request.consumerId,
         reason: request.reason ?? "",
       });
+    },
+
+    close() {
+      const closeable = rawClient as unknown as { close(): void };
+      closeable.close();
     },
   };
 }

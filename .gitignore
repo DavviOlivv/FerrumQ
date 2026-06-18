@@ -4,4 +4,5 @@
 /packages/*/dist/
 /coverage/
 /.pnpm-store/
+/.ferrumq/
 *.log

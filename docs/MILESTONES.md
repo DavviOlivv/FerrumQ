@@ -332,3 +332,57 @@ Deferred from Milestone 11:
   dashboard, OpenTelemetry collector integration, hosted or SaaS telemetry,
   exactly-once delivery, protobuf changes, HTTP/gRPC error shape changes, and
   storage format changes.
+
+## Milestone 12: TypeScript SDK + Examples
+
+- Reusable `FerrumQClient` for HTTP control plane and gRPC data plane.
+- Payload encoding for strings, binary, and JSON-compatible values.
+- Typed error model (`FerrumQError`) distinguishing HTTP, gRPC, and SDK errors.
+- Per-request timeout support.
+- Idempotent `close()` with gRPC channel cleanup.
+- Executable examples for basic flow, NACK/DLQ flow, and status/metrics.
+- Unit tests with mocked transports.
+- SDK documentation.
+
+Status: implemented as `@ferrumq/sdk` with reexports from `@ferrumq/protocol`.
+
+Implemented scope:
+
+- `FerrumQClient` constructor accepting `httpUrl`, `grpcUrl`, and optional
+  `timeoutMs` with early validation.
+- HTTP control-plane methods: `health()`, `readiness()`, `status()`,
+  `createTopic()`, `listTopics()`, `getTopic()`, `listDlq()`, `metrics()`.
+- gRPC data-plane methods: `publish()`, `consume()`, `ack()`, `nack()`.
+- `publish()` encodes `string` as UTF-8, `Uint8Array`/`Buffer` as binary,
+  JSON-compatible values via `JSON.stringify`. Auto-generates `messageId`,
+  `type`, `source`, `contentType`, and `timeUnixMs` defaults.
+- `consume()` normalizes empty optional proto fields to `null`. Defaults
+  `consumerId` to `"ferrumq-sdk"`, `maxMessages` to `1`, `leaseMs` to `30000`.
+- `FerrumQError` with `code`, `status`, `transport` (`"http"` | `"grpc"` |
+  `"sdk"`), and `cause` fields.
+- `ControlPlaneRequestError` from `@ferrumq/protocol` is wrapped into
+  `FerrumQError` with transport `"http"`.
+- gRPC status codes are converted to string names for the `code` field.
+- `close()` is idempotent and closes the gRPC channel.
+- `timeoutMs` uses `Promise.race` for bounded operation rejection.
+- `@ferrumq/protocol` `DataPlaneClient` interface extended with `close()`.
+- `@ferrumq/protocol` `FetchLike` type extended with optional `signal`.
+- Unit tests with vitest covering config validation, payload encoding,
+  HTTP success/error/network, timeout, close idempotency, and public exports.
+- Three executable examples: `basic-flow.ts`, `nack-dlq-flow.ts`,
+  `status-metrics.ts`.
+- Documentation in [SDK.md](SDK.md) and updated README, LOCAL_DEMO.md,
+  ARCHITECTURE.md, PROTOCOL.md, and TESTING_STRATEGY.md.
+
+Deferred from Milestone 12:
+
+- PostgreSQL metadata and projections.
+- File payloads and blob storage.
+- Authentication and API keys.
+- TLS/mTLS.
+- Automatic retry policies.
+- Browser support.
+- Streaming consume.
+- Cluster and replication.
+- Exactly-once delivery.
+- `idempotency_key` enforcement for publish deduplication.

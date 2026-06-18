@@ -108,6 +108,21 @@ Useful keys:
 The TUI reads HTTP state only. With `serve-all`, that HTTP state is backed by
 the same in-process broker that gRPC mutates.
 
+## SDK
+
+The TypeScript SDK provides a typed programmatic client over the same HTTP and
+gRPC surfaces:
+
+```sh
+tsx examples/basic-flow.ts
+tsx examples/nack-dlq-flow.ts
+tsx examples/status-metrics.ts
+```
+
+These run the basic publish/consume/ACK flow, NACK/DLQ inspection, and status
+and metrics retrieval through `@ferrumq/sdk`. See [docs/SDK.md](SDK.md) for
+the full SDK reference.
+
 ## Split-Process Compatibility
 
 `brokerd serve` and `brokerd serve-grpc` remain valid, but they are intentionally

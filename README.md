@@ -33,6 +33,8 @@ systems work:
 - `msg-runtime`: `brokerd`, the local runtime binary for HTTP and gRPC serving.
 - `packages/cli`: `ferrumq` command-line adapter over HTTP and gRPC.
 - `packages/tui`: `ferrumq-tui`, a read-only Ink dashboard over HTTP.
+- `packages/sdk`: `@ferrumq/sdk`, typed TypeScript client for the HTTP control
+  plane and unary gRPC data plane with payload encoding and error handling.
 
 The design is a modular monolith with hexagonal boundaries. Broker behavior
 stays in Rust; TypeScript packages are adapters or client-side helpers.
@@ -169,6 +171,7 @@ docs/                Architecture, protocol, operation, release, and API docs
 - [Architecture](docs/ARCHITECTURE.md)
 - [HTTP Control API](docs/API.md)
 - [Protocol](docs/PROTOCOL.md)
+- [SDK](docs/SDK.md)
 - [CLI](docs/CLI.md)
 - [TUI](docs/TUI.md)
 - [Observability](docs/OBSERVABILITY.md)

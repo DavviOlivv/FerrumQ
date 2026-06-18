@@ -9,6 +9,7 @@ export default tseslint.config(
       "target/**",
       "coverage/**",
       "pnpm-lock.yaml",
+      "examples/**",
     ],
   },
   js.configs.recommended,

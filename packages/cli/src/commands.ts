@@ -365,6 +365,9 @@ function wrapGrpcErrors(client: DataPlaneClient): DataPlaneClient {
         throw new ExpectedCliError(formatGrpcError(error));
       }
     },
+    close() {
+      client.close();
+    },
   };
 }
 
