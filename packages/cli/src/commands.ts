@@ -1,10 +1,10 @@
+import { randomUUID as nodeRandomUUID } from "node:crypto";
 import {
   createGrpcDataPlaneClient,
-  formatGrpcError,
   type DataPlaneClient,
+  formatGrpcError,
 } from "@ferrumq/protocol";
-import { randomUUID as nodeRandomUUID } from "node:crypto";
-
+import { type BrokerdVersionRunner, runBrokerdVersion } from "./brokerd.js";
 import {
   defaultConsumerId,
   defaultPublishContentType,
@@ -13,6 +13,16 @@ import {
   type ResolvedConfig,
 } from "./config.js";
 import { ExpectedCliError } from "./errors.js";
+import {
+  consumedMessageJson,
+  formatDlq,
+  formatMessages,
+  formatPublished,
+  formatStatus,
+  formatTopic,
+  formatTopicList,
+  jsonLine,
+} from "./format.js";
 import {
   ackHelpText,
   brokerHelpText,
@@ -25,21 +35,11 @@ import {
   versionText,
 } from "./help.js";
 import {
-  createControlPlaneClient,
   type ControlPlaneClient,
+  createControlPlaneClient,
   type FetchLike,
 } from "./http-client.js";
-import {
-  consumedMessageJson,
-  formatDlq,
-  formatMessages,
-  formatPublished,
-  formatStatus,
-  formatTopic,
-  formatTopicList,
-  jsonLine,
-} from "./format.js";
-import { runBrokerdVersion, type BrokerdVersionRunner } from "./brokerd.js";
+import type { ParsedCommand } from "./parser.js";
 import {
   parsePositiveInteger,
   validateBoundedText,
@@ -47,8 +47,6 @@ import {
   validateNonEmptyPayload,
   validateTopic,
 } from "./validation.js";
-
-import type { ParsedCommand } from "./parser.js";
 
 export interface CommandDependencies {
   fetch?: FetchLike;

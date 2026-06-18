@@ -1,19 +1,19 @@
-export { cliVersion, resolveConfig } from "./config.js";
-export { parseCliArgs } from "./parser.js";
-export { createControlPlaneClient } from "./http-client.js";
 export { executeCommand } from "./commands.js";
+export { cliVersion, resolveConfig } from "./config.js";
 export { ExpectedCliError } from "./errors.js";
+export { createControlPlaneClient } from "./http-client.js";
+export { parseCliArgs } from "./parser.js";
 
+import { type CommandDependencies, executeCommand } from "./commands.js";
 import {
+  type CliEnvironment,
   defaultControlUrl,
   defaultGrpcUrl,
-  resolveConfig,
-  type CliEnvironment,
   type ResolvedConfig,
+  resolveConfig,
 } from "./config.js";
-import { executeCommand, type CommandDependencies } from "./commands.js";
-import { errorMessage, ExpectedCliError } from "./errors.js";
-import { parseCliArgs, type ParsedCommand } from "./parser.js";
+import { ExpectedCliError, errorMessage } from "./errors.js";
+import { type ParsedCommand, parseCliArgs } from "./parser.js";
 
 export interface CliOutput {
   writeLine(message: string): void;

@@ -1,6 +1,5 @@
-import { ExpectedCliError } from "./errors.js";
-
 import type { GlobalOptions } from "./config.js";
+import { ExpectedCliError } from "./errors.js";
 
 export type ParsedCommand =
   | { kind: "root-help" }

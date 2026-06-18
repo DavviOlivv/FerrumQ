@@ -1,15 +1,13 @@
+import type { DlqEntryResponse, TopicResponse } from "@ferrumq/protocol";
 import { Box, Text, useApp, useInput } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
-
-import { tuiVersion, type TuiConfig } from "./config.js";
+import { type TuiConfig, tuiVersion } from "./config.js";
 import {
   formatTuiError,
-  loadTuiSnapshot,
   type LoadTuiSnapshotDependencies,
+  loadTuiSnapshot,
   type TuiSnapshot,
 } from "./loader.js";
-
-import type { DlqEntryResponse, TopicResponse } from "@ferrumq/protocol";
 
 export type TuiView = "dashboard" | "topics" | "dlq" | "help";
 

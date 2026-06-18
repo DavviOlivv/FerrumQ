@@ -397,7 +397,7 @@ Do not add every dependency immediately if it is not used. However, the architec
 - `tsx`
 - `tsup`
 - `vitest`
-- `typescript-eslint`
+- `@biomejs/biome`
 - `zod`
 - `oclif`
 - `ink`

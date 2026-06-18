@@ -1,37 +1,37 @@
 export {
+  DashboardView,
+  DlqView,
+  FerrumQTui,
+  type FerrumQTuiProps,
+  HelpView,
+  StatusFooter,
+  TopicsView,
+  TuiFrame,
+  type TuiState,
+  type TuiView,
+} from "./components.js";
+export {
   defaultControlUrl,
   defaultGrpcUrl,
   ExpectedTuiError,
   parseTuiArgs,
   resolveTuiConfig,
-  tuiHelpText,
-  tuiVersion,
   type TuiCliOptions,
   type TuiConfig,
   type TuiEnvironment,
+  tuiHelpText,
+  tuiVersion,
 } from "./config.js";
 export {
   formatTuiError,
+  type LoadTuiSnapshotDependencies,
   loadTuiSnapshot,
   TuiLoadError,
-  type LoadTuiSnapshotDependencies,
   type TuiSnapshot,
 } from "./loader.js";
 export {
-  DashboardView,
-  DlqView,
-  FerrumQTui,
-  HelpView,
-  StatusFooter,
-  TopicsView,
-  TuiFrame,
-  type FerrumQTuiProps,
-  type TuiState,
-  type TuiView,
-} from "./components.js";
-export {
-  runTuiCli,
   type RunTuiCliOptions,
+  runTuiCli,
   type TuiCliOutput,
   type TuiRenderer,
 } from "./runner.js";

@@ -1,9 +1,9 @@
-import * as grpc from "@grpc/grpc-js";
-import * as protoLoader from "@grpc/proto-loader";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { z, ZodError, type ZodType } from "zod";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
+import { ZodError, type ZodType, z } from "zod";
 
 export const httpStatusResponseSchema = z.object({
   status: z.string().min(1),
@@ -594,7 +594,10 @@ function createDefaultRawClient(
 
 function resolveFerrumQDataPlaneService(
   grpcObject: Record<string, unknown>,
-): new (target: string, credentials: grpc.ChannelCredentials) => unknown {
+): new (
+  target: string,
+  credentials: grpc.ChannelCredentials,
+) => unknown {
   const ferrumq = recordField(grpcObject, "ferrumq");
   const dataplane = recordField(recordField(ferrumq, "dataplane"), "v1");
   const service = dataplane.FerrumQDataPlane;

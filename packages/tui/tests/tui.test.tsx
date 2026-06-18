@@ -1,37 +1,34 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
-import { createControlPlaneClient } from "@ferrumq/protocol";
-import { render } from "ink-testing-library";
-import type { ReactElement } from "react";
-import { describe, expect, it, vi } from "vitest";
-
-import {
-  DashboardView,
-  DlqView,
-  FerrumQTui,
-  HelpView,
-  TopicsView,
-  TuiFrame,
-  TuiLoadError,
-  defaultControlUrl,
-  defaultGrpcUrl,
-  loadTuiSnapshot,
-  parseTuiArgs,
-  resolveTuiConfig,
-  runTuiCli,
-  tuiVersion,
-  type TuiConfig,
-  type TuiRenderer,
-  type TuiSnapshot,
-} from "../src/index.js";
-
 import type {
   ControlPlaneClient,
   FetchLike,
   ResponseLike,
 } from "@ferrumq/protocol";
+import { createControlPlaneClient } from "@ferrumq/protocol";
+import { render } from "ink-testing-library";
+import type { ReactElement } from "react";
+import { describe, expect, it, vi } from "vitest";
+import {
+  DashboardView,
+  DlqView,
+  defaultControlUrl,
+  defaultGrpcUrl,
+  FerrumQTui,
+  HelpView,
+  loadTuiSnapshot,
+  parseTuiArgs,
+  resolveTuiConfig,
+  runTuiCli,
+  TopicsView,
+  type TuiConfig,
+  TuiFrame,
+  TuiLoadError,
+  type TuiRenderer,
+  type TuiSnapshot,
+  tuiVersion,
+} from "../src/index.js";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -793,20 +790,17 @@ describe("TUI CLI runner", () => {
       ["--grpc-url", "https://broker.local:9090"],
       "gRPC URL TLS/HTTPS is deferred; use http://host:port",
     ],
-  ] as const)(
-    "returns a stackless error for %s",
-    async (args, expectedError) => {
-      const renderer = rendererSpy();
-      const result = await captureRun(args, { renderTui: renderer.renderTui });
+  ] as const)("returns a stackless error for %s", async (args, expectedError) => {
+    const renderer = rendererSpy();
+    const result = await captureRun(args, { renderTui: renderer.renderTui });
 
-      expect(result.code).not.toBe(0);
-      expect(result.stdout).toEqual([]);
-      expect(result.stderr).toEqual([expectedError]);
-      expect(result.stderr.join("\n")).not.toContain("ExpectedTuiError");
-      expect(result.stderr.join("\n")).not.toContain(" at ");
-      expect(renderer.renderTui).not.toHaveBeenCalled();
-    },
-  );
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toEqual([]);
+    expect(result.stderr).toEqual([expectedError]);
+    expect(result.stderr.join("\n")).not.toContain("ExpectedTuiError");
+    expect(result.stderr.join("\n")).not.toContain(" at ");
+    expect(renderer.renderTui).not.toHaveBeenCalled();
+  });
 
   it("returns a stackless config error for invalid environment values", async () => {
     const renderer = rendererSpy();

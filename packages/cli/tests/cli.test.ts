@@ -1,9 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
+import type { DataPlaneClient } from "@ferrumq/protocol";
 import { describe, expect, it, vi } from "vitest";
-
+import type {
+  ControlPlaneClient,
+  FetchLike,
+  ResponseLike,
+} from "../src/http-client.js";
+import type { RunCliOptions } from "../src/index.js";
 import {
   cliVersion,
   createControlPlaneClient,
@@ -11,14 +16,6 @@ import {
   resolveConfig,
   runCli,
 } from "../src/index.js";
-
-import type { DataPlaneClient } from "@ferrumq/protocol";
-import type {
-  ControlPlaneClient,
-  FetchLike,
-  ResponseLike,
-} from "../src/http-client.js";
-import type { RunCliOptions } from "../src/index.js";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

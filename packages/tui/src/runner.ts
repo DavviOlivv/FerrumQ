@@ -6,9 +6,9 @@ import {
   ExpectedTuiError,
   parseTuiArgs,
   resolveTuiConfig,
+  type TuiEnvironment,
   tuiHelpText,
   tuiVersion,
-  type TuiEnvironment,
 } from "./config.js";
 
 export interface TuiCliOutput {

@@ -1,9 +1,3 @@
-import {
-  ControlPlaneRequestError,
-  createControlPlaneClient,
-} from "@ferrumq/protocol";
-
-import type { TuiConfig } from "./config.js";
 import type {
   BrokerStatusResponse,
   ControlPlaneClient,
@@ -12,6 +6,11 @@ import type {
   HttpStatusResponse,
   TopicListResponse,
 } from "@ferrumq/protocol";
+import {
+  ControlPlaneRequestError,
+  createControlPlaneClient,
+} from "@ferrumq/protocol";
+import type { TuiConfig } from "./config.js";
 
 export interface TuiSnapshot {
   health: HttpStatusResponse;

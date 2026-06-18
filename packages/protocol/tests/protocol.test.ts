@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
-
+import type { FetchLike, ResponseLike } from "../src/index.js";
 import {
   brokerStatusResponseSchema,
   ControlPlaneRequestError,
@@ -18,8 +18,6 @@ import {
   topicListResponseSchema,
   topicResponseSchema,
 } from "../src/index.js";
-
-import type { FetchLike, ResponseLike } from "../src/index.js";
 
 describe("HTTP schemas", () => {
   it("parses success DTOs", () => {
