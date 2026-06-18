@@ -1,4 +1,4 @@
-import { FerrumQClient } from "@ferrumq/sdk";
+import { FerrumQClient, type Topic } from "@ferrumq/sdk";
 
 const HTTP_URL = process.env.FERRUMQ_HTTP_URL ?? "http://127.0.0.1:8080";
 const GRPC_URL = process.env.FERRUMQ_GRPC_URL ?? "http://127.0.0.1:9090";
@@ -15,7 +15,7 @@ async function main() {
   });
 
   try {
-    let topic;
+    let topic: Topic | undefined;
     try {
       topic = await client.createTopic({ name: "orders", partitions: 1 });
     } catch (error) {
@@ -47,12 +47,12 @@ async function main() {
         maxMessages: 1,
       });
 
-      if (deliveries.length === 0) {
+      const [delivery] = deliveries;
+      if (delivery === undefined) {
         console.log("no deliveries (message may have moved to DLQ)");
         break;
       }
 
-      const delivery = deliveries[0]!;
       console.log(`deliveryId: ${delivery.deliveryId}`);
       console.log(`  attempt: ${delivery.attemptNumber}`);
 

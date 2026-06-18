@@ -1,4 +1,4 @@
-import { FerrumQClient } from "@ferrumq/sdk";
+import { FerrumQClient, type Topic } from "@ferrumq/sdk";
 
 const HTTP_URL = process.env.FERRUMQ_HTTP_URL ?? "http://127.0.0.1:8080";
 const GRPC_URL = process.env.FERRUMQ_GRPC_URL ?? "http://127.0.0.1:9090";
@@ -20,7 +20,7 @@ async function main() {
     console.log(ready);
 
     console.log("--- createTopic ---");
-    let topic;
+    let topic: Topic | undefined;
     try {
       topic = await client.createTopic({ name: "orders", partitions: 3 });
     } catch (error) {
