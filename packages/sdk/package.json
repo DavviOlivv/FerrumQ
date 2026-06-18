@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "test": "pnpm run build && (test -x ../../target/debug/brokerd || cargo build --manifest-path ../../Cargo.toml -p msg-runtime --bin brokerd) && vitest run",
-    "typecheck": "pnpm --filter @ferrumq/protocol run build && tsc --noEmit"
+    "typecheck": "pnpm run build && tsc --noEmit"
   },
   "dependencies": {
     "@ferrumq/protocol": "workspace:*"
