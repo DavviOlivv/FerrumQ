@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && node -e \"process.platform !== 'win32' && require('fs').chmodSync('dist/cli.js', 0o755)\"",
     "test": "pnpm run build && node ../../scripts/ensure-brokerd.mjs && vitest run",
-    "typecheck": "pnpm run build && tsc --noEmit"
+    "typecheck": "pnpm --filter @ferrumq/protocol run build && pnpm --filter @ferrumq/sdk run build && pnpm run build && tsc --noEmit"
   },
   "dependencies": {
     "@ferrumq/sdk": "workspace:*",

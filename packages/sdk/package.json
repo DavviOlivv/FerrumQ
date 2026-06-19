@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "test": "pnpm run build && node ../../scripts/ensure-brokerd.mjs && vitest run",
-    "typecheck": "pnpm run build && tsc --noEmit"
+    "typecheck": "pnpm --filter @ferrumq/protocol run build && pnpm run build && tsc --noEmit"
   },
   "dependencies": {
     "@ferrumq/protocol": "workspace:*"
