@@ -147,11 +147,17 @@ describe("ChatUi", () => {
 
     expect(FerrumQClient).toHaveBeenCalledOnce();
     expect(clientAt(0).consume).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(1);
+
+    const consumeCallsBeforeUnmount = clientAt(0).consume.mock.calls.length;
 
     view.unmount();
     await vi.runAllTimersAsync();
-    expect(vi.getTimerCount()).toBe(0);
+
+    expect(FerrumQClient).toHaveBeenCalledOnce();
+    expect(clientAt(0).consume.mock.calls.length).toBe(
+      consumeCallsBeforeUnmount,
+    );
+    expect(clientAt(0).close).toHaveBeenCalledOnce();
   });
 
   it.each([
