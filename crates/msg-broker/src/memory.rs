@@ -8,6 +8,7 @@ use crate::{
     delivery::{ConsumedMessage, DeadLetterEntry, PublishedMessage, RetrySummary},
     errors::{BrokerError, BrokerResult},
     helpers::{add_millis, deterministic_delivery_id, select_partition},
+    idempotency::IdempotencyRecord,
     state::{
         BrokerState, GroupPartitionState, MessageRef, PendingDelivery, RetryEntry, StoredTopic,
     },
@@ -40,6 +41,38 @@ impl InMemoryBrokerState {
         topic: TopicName,
         envelope: MessageEnvelope,
     ) -> BrokerResult<PublishedMessage> {
+        // Idempotency check: if the envelope carries an idempotency key, look
+        // up the existing record BEFORE selecting a partition or advancing
+        // round-robin state. A duplicate retry must not alter future partition
+        // assignment or append another message.
+        let idempotency_key = envelope.idempotency_key().cloned();
+        if let Some(key) = &idempotency_key {
+            let lookup_key = (topic.clone(), key.clone());
+            if let Some(existing) = self.state.idempotency_index.get(&lookup_key) {
+                let fingerprint =
+                    crate::idempotency::PublishFingerprint::compute(&topic, &envelope);
+                if existing.fingerprint() == &fingerprint {
+                    // Equivalent retry — return the original identity without
+                    // appending or advancing round-robin.
+                    return Ok(PublishedMessage::replay(
+                        topic,
+                        existing.partition_id(),
+                        existing.offset(),
+                        existing.message_id().clone(),
+                    ));
+                }
+                // Conflicting reuse — reject without appending.
+                return Err(BrokerError::IdempotencyKeyConflict {
+                    topic: topic.clone(),
+                });
+            }
+        }
+
+        // No existing record — proceed with normal append.
+        let fingerprint = idempotency_key
+            .as_ref()
+            .map(|_| crate::idempotency::PublishFingerprint::compute(&topic, &envelope));
+
         let stored_topic =
             self.state
                 .topics
@@ -59,12 +92,18 @@ impl InMemoryBrokerState {
             stored_topic.advance_round_robin_partition();
         }
 
-        Ok(PublishedMessage::new(
-            topic,
-            partition_id,
-            offset,
-            message_id,
-        ))
+        let result = PublishedMessage::new(topic.clone(), partition_id, offset, message_id);
+
+        // Register the idempotency record only after the append succeeds, so a
+        // failed append does not reserve the key.
+        if let (Some(key), Some(fp)) = (idempotency_key, fingerprint) {
+            self.state.idempotency_index.insert(
+                (topic, key),
+                IdempotencyRecord::new(fp, partition_id, offset, result.message_id().clone()),
+            );
+        }
+
+        Ok(result)
     }
 
     pub(crate) fn consume(

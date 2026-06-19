@@ -447,6 +447,7 @@ impl ApiError {
             }
             DurableBrokerError::Broker(BrokerError::DeliveryNotFound { .. })
             | DurableBrokerError::Broker(BrokerError::InvalidConsumer { .. })
+            | DurableBrokerError::Broker(BrokerError::IdempotencyKeyConflict { .. })
             | DurableBrokerError::Storage(_)
             | DurableBrokerError::Io(_)
             | DurableBrokerError::Serde(_)

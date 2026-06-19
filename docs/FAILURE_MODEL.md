@@ -5,7 +5,12 @@ broker foundation.
 
 ## Producer Retry
 
-Future producers may retry publish requests on transient failures. Retries can create duplicate publish attempts, so publish APIs must support idempotency keys or deduplication metadata.
+Producers may retry publish requests on transient failures. When a non-empty
+`idempotency_key` is provided, an equivalent retry returns the original publish
+result without appending or delivering another message. The key is scoped by
+`(topic, idempotency_key)`. A deterministic SHA-256 fingerprint of the semantic
+publish intent (excluding `message_id`, timestamp, and the key itself) defines
+equivalence. See ADR 0017 for the full design.
 
 ## Consumer Crash
 
@@ -33,7 +38,12 @@ Corruption handling must protect valid records and avoid silently delivering cor
 
 ## Duplicate Publish
 
-At-least-once producer retry means duplicate publish requests are possible. Future idempotency support should detect duplicate IDs or idempotency keys within a documented retention window.
+At-least-once producer retry means duplicate publish requests are possible. When
+a non-empty `idempotency_key` is provided, the broker deduplicates equivalent
+retries to the original publish result without appending another message.
+Conflicting reuse of the same key with a different semantic intent is rejected
+with `IDEMPOTENCY_KEY_CONFLICT`. Idempotency records live for the lifetime of
+retained local broker data.
 
 ## Duplicate Delivery
 

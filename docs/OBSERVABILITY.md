@@ -120,8 +120,13 @@ Broker counters:
 - `ferrumq_broker_recoveries_total`: broker-state recovery passes by `status`.
 - `ferrumq_broker_topics_created_total`: durable topic creation attempts by
   `status`.
-- `ferrumq_broker_messages_published_total`: durable publish attempts by
-  `status`.
+- `ferrumq_broker_messages_published_total`: durable messages actually appended
+  to the log by `status`. Deduplicated retries are not counted here (see
+  `ferrumq_broker_publish_deduplicated_total`).
+- `ferrumq_broker_publish_deduplicated_total`: publish requests deduplicated
+  as equivalent retries of a prior successful publish.
+- `ferrumq_broker_publish_idempotency_conflicts_total`: publish requests
+  rejected because the idempotency key was reused with conflicting intent.
 - `ferrumq_broker_consumes_total`: durable consume attempts by `status`.
 - `ferrumq_broker_deliveries_created_total`: delivery records created.
 - `ferrumq_broker_acks_total`: durable ACK attempts by `status`.

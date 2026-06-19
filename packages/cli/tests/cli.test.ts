@@ -497,6 +497,7 @@ describe("JSON output contracts", () => {
           topic: "orders",
           partition: 0,
           offset: "9007199254740993",
+          deduplicated: false,
         },
       },
     );
@@ -600,6 +601,71 @@ describe("validation and expected failures", () => {
       stdout: [],
       stderr: ["gRPC INVALID_ARGUMENT (3): topic_name must not be empty"],
     });
+  });
+
+  it("formats idempotency key conflict with public error code", async () => {
+    const dataPlaneClient: DataPlaneClient = {
+      async publish() {
+        throw { code: 6, details: "idempotency key conflict" };
+      },
+      consume: unreachableDataPlaneClient().consume,
+      ack: unreachableDataPlaneClient().ack,
+      nack: unreachableDataPlaneClient().nack,
+      close: unreachableDataPlaneClient().close,
+    };
+
+    const result = await captureRun(
+      ["publish", "orders", "--data", "hello", "--idempotency-key", "idem-1"],
+      { dataPlaneClient },
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toHaveLength(1);
+    expect(result.stderr[0]).toContain("IDEMPOTENCY_KEY_CONFLICT");
+    expect(result.stderr[0]).toContain("idempotency key conflict");
+    expect(result.stdout).toEqual([]);
+  });
+
+  it("shows deduplicated indicator for human output", async () => {
+    const dataPlaneClient = stubDataPlaneClient({ deduplicated: true });
+
+    const result = await captureRun(
+      ["publish", "orders", "--data", "hello", "--idempotency-key", "idem-1"],
+      { dataPlaneClient },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toEqual([
+      "published: msg_00000000-0000-4000-8000-000000000001 orders[0]@9007199254740993 (deduplicated)",
+    ]);
+  });
+
+  it("shows deduplicated in JSON output when applicable", async () => {
+    const dataPlaneClient = stubDataPlaneClient({ deduplicated: true });
+
+    expectSuccessfulJson(
+      await captureRun(
+        [
+          "--json",
+          "publish",
+          "orders",
+          "--data",
+          "hello",
+          "--idempotency-key",
+          "idem-1",
+        ],
+        { dataPlaneClient },
+      ),
+      {
+        message: {
+          id: "msg_00000000-0000-4000-8000-000000000001",
+          topic: "orders",
+          partition: 0,
+          offset: "9007199254740993",
+          deduplicated: true,
+        },
+      },
+    );
   });
 });
 
@@ -932,7 +998,9 @@ function stubControlClient(): ControlPlaneClient {
   };
 }
 
-function stubDataPlaneClient(): DataPlaneClient {
+function stubDataPlaneClient(opts?: {
+  deduplicated?: boolean;
+}): DataPlaneClient {
   return {
     async publish(request) {
       return {
@@ -940,6 +1008,7 @@ function stubDataPlaneClient(): DataPlaneClient {
         partition: 0,
         offset: "9007199254740993",
         messageId: request.messageId,
+        deduplicated: opts?.deduplicated ?? false,
       };
     },
     async consume(request) {

@@ -43,7 +43,7 @@ stays in Rust; TypeScript packages are adapters or client-side helpers.
 ## Current Capabilities
 
 - Local durable topic creation and deterministic topic listing.
-- Durable publish through unary gRPC.
+- Durable publish through unary gRPC with optional idempotency-key deduplication.
 - Unary consume with leases and at-least-once delivery.
 - ACK, NACK, retry maintenance, and DLQ transitions.
 - Reopen recovery for published, ACKed, and in-flight local state.
@@ -56,13 +56,14 @@ stays in Rust; TypeScript packages are adapters or client-side helpers.
 
 FerrumQ currently provides local durable at-least-once delivery only. Consumers
 must be idempotent. The project does not provide exactly-once delivery,
-producer deduplication, clustering, replication, consensus, auth/RBAC, TLS,
+clustering, replication, consensus, auth/RBAC, TLS,
 rate limiting, hosted telemetry, dashboards, multi-tenancy, MaaS behavior, or
 production daemon hardening.
 
-`idempotency_key` is metadata-only and is not enforced for publish
-deduplication. Message payloads are not logged by default and are not exported
-as metric labels.
+Publish idempotency via `idempotency_key` provides producer-side deduplication
+for equivalent retries. Conflicting reuse of a key is rejected. Idempotency
+records live for the lifetime of retained local broker data. Message payloads
+are not logged by default and are not exported as metric labels.
 
 ## Quickstart
 

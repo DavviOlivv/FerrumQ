@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use msg_core::{
-    ConsumerGroupId, ConsumerId, DeliveryId, MessageEnvelope, MessageTimestamp, Offset,
-    PartitionId, Topic, TopicName,
+    ConsumerGroupId, ConsumerId, DeliveryId, IdempotencyKey, MessageEnvelope, MessageTimestamp,
+    Offset, PartitionId, Topic, TopicName,
 };
 
 use crate::delivery::DeadLetterEntry;
 use crate::helpers::advance_round_robin_partition;
+use crate::idempotency::IdempotencyRecord;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StoredTopic {
@@ -205,4 +206,5 @@ pub(crate) struct BrokerState {
     pub(crate) groups: BTreeMap<ConsumerGroupId, GroupState>,
     pub(crate) pending: BTreeMap<DeliveryId, PendingDelivery>,
     pub(crate) dead_letters: Vec<DeadLetterEntry>,
+    pub(crate) idempotency_index: BTreeMap<(TopicName, IdempotencyKey), IdempotencyRecord>,
 }

@@ -178,7 +178,7 @@ const result: PublishResult = await client.publish({
 - `type` (optional): Defaults to `"ferrumq.sdk.message"`.
 - `source` (optional): Defaults to `"ferrumq-sdk"`.
 - `subject` (optional): Event subject.
-- `idempotencyKey` (optional): Metadata only; deduplication is not enforced.
+- `idempotencyKey` (optional): Enables durable publish idempotency scoped by `(topic, key)`. An equivalent retry returns the original publish identity with `deduplicated: true`. Conflicting reuse (same key, different content) throws `FerrumQError` with code `"IDEMPOTENCY_KEY_CONFLICT"`.
 - `timeUnixMs` (optional): Defaults to `Date.now()`.
 
 ### `consume(request)`
@@ -357,5 +357,5 @@ The following are explicitly deferred and not provided by this SDK:
 - Browser support.
 - Streaming consume.
 - Cluster and replication.
-- Exactly-once delivery.
-- `idempotency_key` enforcement for publish deduplication.
+- Exactly-once delivery (publish idempotency via `idempotencyKey` is
+  producer-side deduplication, not consumer-side exactly-once).

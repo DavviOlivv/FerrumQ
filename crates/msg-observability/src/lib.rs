@@ -23,6 +23,9 @@ pub mod metric_names {
     pub const BROKER_RECOVERIES_TOTAL: &str = "ferrumq_broker_recoveries_total";
     pub const BROKER_TOPICS_CREATED_TOTAL: &str = "ferrumq_broker_topics_created_total";
     pub const BROKER_MESSAGES_PUBLISHED_TOTAL: &str = "ferrumq_broker_messages_published_total";
+    pub const BROKER_PUBLISH_DEDUPLICATED_TOTAL: &str = "ferrumq_broker_publish_deduplicated_total";
+    pub const BROKER_PUBLISH_IDEMPOTENCY_CONFLICTS_TOTAL: &str =
+        "ferrumq_broker_publish_idempotency_conflicts_total";
     pub const BROKER_CONSUMES_TOTAL: &str = "ferrumq_broker_consumes_total";
     pub const BROKER_DELIVERIES_CREATED_TOTAL: &str = "ferrumq_broker_deliveries_created_total";
     pub const BROKER_ACKS_TOTAL: &str = "ferrumq_broker_acks_total";
@@ -99,7 +102,19 @@ const COUNTERS: &[CounterDescriptor] = &[
     },
     CounterDescriptor {
         name: metric_names::BROKER_MESSAGES_PUBLISHED_TOTAL,
-        help: "Durable broker publish attempts by outcome.",
+        help: "Durable broker messages actually appended to the log by outcome. \
+               Deduplicated retries are not counted here; see \
+               ferrumq_broker_publish_deduplicated_total.",
+    },
+    CounterDescriptor {
+        name: metric_names::BROKER_PUBLISH_DEDUPLICATED_TOTAL,
+        help: "Durable broker publish requests that were deduplicated as \
+               equivalent retries of a prior successful publish.",
+    },
+    CounterDescriptor {
+        name: metric_names::BROKER_PUBLISH_IDEMPOTENCY_CONFLICTS_TOTAL,
+        help: "Durable broker publish requests rejected because the \
+               idempotency key was reused with conflicting semantic intent.",
     },
     CounterDescriptor {
         name: metric_names::BROKER_CONSUMES_TOTAL,
@@ -350,6 +365,29 @@ pub mod metrics {
         increment_status_counter(metric_names::BROKER_MESSAGES_PUBLISHED_TOTAL, status);
     }
 
+    /// Records a deduplicated publish retry. This counter is labelless and
+    /// increments only when an equivalent retry returns the original publish
+    /// identity without appending a new message. It does NOT increment
+    /// `ferrumq_broker_messages_published_total`.
+    pub fn record_broker_publish_deduplicated() {
+        increment_counter(
+            metric_names::BROKER_PUBLISH_DEDUPLICATED_TOTAL,
+            Vec::new(),
+            1,
+        );
+    }
+
+    /// Records an idempotency key conflict. This counter is labelless and
+    /// increments only when a publish is rejected because the idempotency key
+    /// was reused with conflicting semantic intent.
+    pub fn record_broker_publish_idempotency_conflict() {
+        increment_counter(
+            metric_names::BROKER_PUBLISH_IDEMPOTENCY_CONFLICTS_TOTAL,
+            Vec::new(),
+            1,
+        );
+    }
+
     pub fn record_broker_consume(status: &'static str) {
         increment_status_counter(metric_names::BROKER_CONSUMES_TOTAL, status);
     }
@@ -590,6 +628,8 @@ pub mod metrics {
             record_broker_recovery("success");
             record_broker_topic_create("success");
             record_broker_publish("success");
+            record_broker_publish_deduplicated();
+            record_broker_publish_idempotency_conflict();
             record_broker_consume("success");
             record_broker_deliveries_created(1);
             record_broker_ack("success");
@@ -744,6 +784,8 @@ pub mod metrics {
             record_data_publish("success");
             record_data_messages_delivered(2);
             record_broker_dlq_transition("nack", 1);
+            record_broker_publish_deduplicated();
+            record_broker_publish_idempotency_conflict();
             record_storage_error("io");
 
             let output = render_prometheus();
@@ -761,6 +803,8 @@ pub mod metrics {
             record_control_http_request("GET", "/metrics", 200);
             record_data_rpc_request("Publish", "ok");
             record_broker_dlq_transition("nack", 1);
+            record_broker_publish_deduplicated();
+            record_broker_publish_idempotency_conflict();
             record_storage_error("io");
 
             let output = render_prometheus();

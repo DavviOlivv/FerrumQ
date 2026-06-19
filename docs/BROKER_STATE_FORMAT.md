@@ -36,9 +36,13 @@ Reopen recovery is deterministic:
 3. Replay topic metadata and delivery transitions.
 4. Reopen all message partition logs under `<root>/messages`.
 5. Reconstruct per-topic round-robin state from recovered unkeyed messages.
-6. Release any remaining pending deliveries so they can be redelivered with the next attempt number.
+6. Rebuild the in-memory idempotency index from durable message records (see
+   ADR 0017). Historical duplicates with equivalent intent keep the earliest
+   record by canonical order as canonical; conflicting duplicates fail open
+   with `DurableBrokerError::Corruption`.
+7. Release any remaining pending deliveries so they can be redelivered with the next attempt number.
 
-Message records remain the source of envelopes and offsets. Broker-state events are the source of topic metadata, pending deliveries, ACKs, retry state, and DLQ state.
+Message records remain the source of envelopes, offsets, and idempotency state. Broker-state events are the source of topic metadata, pending deliveries, ACKs, retry state, and DLQ state.
 
 ## Operation Boundaries
 
@@ -73,5 +77,7 @@ Complete but inconsistent state events, such as a duplicate recovered `topic_cre
 - Durability is local and flush-based; explicit fsync policy tuning is deferred.
 - There is no broker-state compaction.
 - There is no replication, clustering, or consensus.
-- There is no exactly-once delivery or deduplication enforcement.
+- There is no exactly-once delivery. Publish idempotency via `idempotency_key`
+  provides producer-side deduplication of equivalent retries, not consumer-side
+  exactly-once processing.
 - Consumers must be idempotent because at-least-once redelivery is expected.

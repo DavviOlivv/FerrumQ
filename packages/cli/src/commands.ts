@@ -3,6 +3,7 @@ import {
   createGrpcDataPlaneClient,
   type DataPlaneClient,
   formatGrpcError,
+  grpcStatusName,
 } from "@ferrumq/protocol";
 import { type BrokerdVersionRunner, runBrokerdVersion } from "./brokerd.js";
 import {
@@ -238,6 +239,7 @@ async function publish(
             topic: response.topic,
             partition: response.partition,
             offset: response.offset,
+            deduplicated: response.deduplicated,
           },
         }),
       )
@@ -339,6 +341,17 @@ function wrapGrpcErrors(client: DataPlaneClient): DataPlaneClient {
       try {
         return await client.publish(request);
       } catch (error) {
+        const statusName =
+          typeof (error as { code?: unknown }).code === "number"
+            ? grpcStatusName((error as { code?: unknown }).code as number)
+            : undefined;
+        if (statusName === "ALREADY_EXISTS") {
+          const details =
+            typeof (error as { details?: unknown }).details === "string"
+              ? (error as { details: string }).details
+              : "";
+          throw new ExpectedCliError(`IDEMPOTENCY_KEY_CONFLICT: ${details}`, 1);
+        }
         throw new ExpectedCliError(formatGrpcError(error));
       }
     },

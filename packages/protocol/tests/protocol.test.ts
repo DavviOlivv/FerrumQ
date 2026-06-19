@@ -520,6 +520,7 @@ describe("gRPC client helpers", () => {
               partition: 0,
               offset: "18446744073709551615",
               messageId: "message-1",
+              deduplicated: false,
             });
           },
         };
@@ -541,6 +542,7 @@ describe("gRPC client helpers", () => {
       partition: 0,
       offset: "18446744073709551615",
       messageId: "message-1",
+      deduplicated: false,
     });
 
     expect(calls).toEqual([

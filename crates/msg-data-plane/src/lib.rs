@@ -114,7 +114,8 @@ impl FerrumQDataPlane for DataPlaneService {
                     topic = response.topic.as_str(),
                     partition = response.partition,
                     offset = response.offset,
-                    message_id = response.message_id.as_str()
+                    message_id = response.message_id.as_str(),
+                    deduplicated = response.deduplicated
                 );
             }
             Err(status) => {
@@ -203,6 +204,7 @@ impl DataPlaneService {
             partition: published.partition_id().value(),
             offset: published.offset().value(),
             message_id: published.message_id().as_str().to_owned(),
+            deduplicated: published.deduplicated(),
         })
     }
 
@@ -442,6 +444,9 @@ fn status_from_broker(error: BrokerError) -> Status {
         }
         BrokerError::InvalidConfig { field, reason } => {
             Status::invalid_argument(format!("{field} {reason}"))
+        }
+        BrokerError::IdempotencyKeyConflict { .. } => {
+            Status::already_exists("idempotency key conflict")
         }
     }
 }

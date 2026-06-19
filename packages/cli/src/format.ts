@@ -47,7 +47,8 @@ export function formatDlq(entries: DlqEntryResponse[]): string {
 }
 
 export function formatPublished(response: DataPlanePublishResponse): string {
-  return `published: ${response.messageId} ${response.topic}[${response.partition}]@${response.offset}`;
+  const base = `published: ${response.messageId} ${response.topic}[${response.partition}]@${response.offset}`;
+  return response.deduplicated ? `${base} (deduplicated)` : base;
 }
 
 export function formatMessages(messages: DataPlaneConsumedMessage[]): string {
