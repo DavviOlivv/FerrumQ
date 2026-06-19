@@ -13,8 +13,10 @@ candidate.
 - Exactly-once delivery, clustering, replication, consensus, auth/RBAC, TLS,
   rate limiting, MaaS/multi-tenancy, hosted telemetry, dashboards, and
   production daemon hardening are not claimed.
-- `idempotency_key` is described as metadata-only with no producer
-  deduplication guarantee.
+- `idempotency_key` provides durable publish idempotency scoped by
+  `(topic, key)`. Equivalent retries return the original result; conflicting
+  reuse is rejected. Idempotency records live for the lifetime of retained
+  local broker data.
 - Message payloads are not claimed to be logged or exposed as metric labels.
 
 ## Version Gate

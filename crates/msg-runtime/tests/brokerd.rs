@@ -39,7 +39,7 @@ fn publish_request(message_id: &str) -> PublishRequest {
         r#type: "order.created".to_owned(),
         source: "/runtime-test".to_owned(),
         subject: "subject-1".to_owned(),
-        idempotency_key: "idem-1".to_owned(),
+        idempotency_key: String::new(),
         time_unix_ms: 1_700_000_000_000,
     }
 }

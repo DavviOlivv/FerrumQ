@@ -81,6 +81,10 @@ export function publishHelpText(): string {
     "  ferrumq publish <topic> --data <string> [--content-type <type>] [--type <type>] [--source <source>] [--subject <subject>] [--idempotency-key <key>]",
     "  ferrumq publish --help",
     "",
+    "--idempotency-key is scoped per topic. A retry with the same key and",
+    "equivalent content returns the original publish result without appending",
+    "another message. Conflicting reuse (same key, different content) fails.",
+    "",
     "Publish uses the unary gRPC data plane.",
   ].join("\n");
 }

@@ -10,6 +10,7 @@ pub struct PublishedMessage {
     partition_id: PartitionId,
     offset: Offset,
     message_id: MessageId,
+    deduplicated: bool,
 }
 
 impl PublishedMessage {
@@ -25,6 +26,26 @@ impl PublishedMessage {
             partition_id,
             offset,
             message_id,
+            deduplicated: false,
+        }
+    }
+
+    /// Creates a `PublishedMessage` that represents a deduplicated retry —
+    /// the original publish identity is preserved and `deduplicated` is
+    /// `true`.
+    #[must_use]
+    pub(crate) fn replay(
+        topic: TopicName,
+        partition_id: PartitionId,
+        offset: Offset,
+        message_id: MessageId,
+    ) -> Self {
+        Self {
+            topic,
+            partition_id,
+            offset,
+            message_id,
+            deduplicated: true,
         }
     }
 
@@ -46,6 +67,15 @@ impl PublishedMessage {
     #[must_use]
     pub fn message_id(&self) -> &MessageId {
         &self.message_id
+    }
+
+    /// Returns `true` if this publish result represents a deduplicated retry
+    /// of a prior successful publish with the same idempotency key and
+    /// equivalent semantic intent. Returns `false` for a first successful
+    /// publish or any publish without an idempotency key.
+    #[must_use]
+    pub fn deduplicated(&self) -> bool {
+        self.deduplicated
     }
 }
 

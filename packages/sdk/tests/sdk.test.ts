@@ -695,6 +695,198 @@ describe("FerrumQClient publish error wrapping", () => {
   });
 });
 
+describe("FerrumQClient publish idempotency", () => {
+  it("returns deduplicated=false for a first publish", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            publish(
+              _request: unknown,
+              _options: unknown,
+              callback: (error: null, response: unknown) => void,
+            ) {
+              callback(null, {
+                topic: "orders",
+                partition: 0,
+                offset: "0",
+                messageId: "msg-1",
+                deduplicated: false,
+              });
+            },
+          };
+        },
+      },
+    });
+
+    const result = await client.publish({
+      topic: "orders",
+      payload: { event: "created" },
+      idempotencyKey: "idem-1",
+    });
+    expect(result.deduplicated).toBe(false);
+    client.close();
+  });
+
+  it("returns deduplicated=true for an equivalent retry", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            publish(
+              _request: unknown,
+              _options: unknown,
+              callback: (error: null, response: unknown) => void,
+            ) {
+              callback(null, {
+                topic: "orders",
+                partition: 0,
+                offset: "0",
+                messageId: "msg-original",
+                deduplicated: true,
+              });
+            },
+          };
+        },
+      },
+    });
+
+    const result = await client.publish({
+      topic: "orders",
+      payload: { event: "created" },
+      idempotencyKey: "idem-1",
+      messageId: "msg-retry",
+    });
+    expect(result.deduplicated).toBe(true);
+    expect(result.messageId).toBe("msg-original");
+    client.close();
+  });
+
+  it("normalizes ALREADY_EXISTS to IDEMPOTENCY_KEY_CONFLICT for publish", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            publish(
+              _request: unknown,
+              _options: unknown,
+              callback: (error: unknown, _response: unknown) => void,
+            ) {
+              callback(
+                { code: 6, details: "idempotency key conflict" },
+                undefined,
+              );
+            },
+          };
+        },
+      },
+    });
+
+    try {
+      await client.publish({
+        topic: "orders",
+        payload: { event: "created" },
+        idempotencyKey: "idem-1",
+      });
+      expect.fail("publish should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(FerrumQError);
+      const fe = error as FerrumQError;
+      expect(fe.code).toBe("IDEMPOTENCY_KEY_CONFLICT");
+      expect(fe.grpcStatus).toBe("ALREADY_EXISTS");
+      expect(fe.transport).toBe("grpc");
+      expect(fe.operation).toBe("publish");
+    }
+    client.close();
+  });
+
+  it("preserves ALREADY_EXISTS code for non-publish operations", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            consume(
+              _request: unknown,
+              _options: unknown,
+              callback: (error: unknown, _response: unknown) => void,
+            ) {
+              callback({ code: 6, details: "already exists" }, undefined);
+            },
+          };
+        },
+      },
+    });
+
+    try {
+      await client.consume({ topic: "orders", group: "workers" });
+      expect.fail("consume should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(FerrumQError);
+      const fe = error as FerrumQError;
+      expect(fe.code).toBe("ALREADY_EXISTS");
+      expect(fe.grpcStatus).toBe("ALREADY_EXISTS");
+    }
+    client.close();
+  });
+
+  it("passes binary payloads through the idempotent publish path", async () => {
+    let capturedRequest: Record<string, unknown> | undefined;
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            publish(
+              request: unknown,
+              _options: unknown,
+              callback: (error: null, response: unknown) => void,
+            ) {
+              capturedRequest = request as Record<string, unknown>;
+              callback(null, {
+                topic: "orders",
+                partition: 0,
+                offset: "0",
+                messageId: "msg-1",
+                deduplicated: false,
+              });
+            },
+          };
+        },
+      },
+    });
+
+    const binaryPayload = new Uint8Array([0x00, 0xff, 0xfe, 0x01]);
+    const result = await client.publish({
+      topic: "orders",
+      payload: binaryPayload,
+      idempotencyKey: "idem-binary",
+    });
+    expect(result.deduplicated).toBe(false);
+    expect(capturedRequest?.idempotencyKey).toBe("idem-binary");
+    expect(capturedRequest?.payload).toEqual(Buffer.from(binaryPayload));
+    client.close();
+  });
+});
+
 describe("FerrumQClient consumed payload", () => {
   it("returns Uint8Array payloads that are independent copies", async () => {
     const originalPayload = Buffer.from([0x01, 0x02, 0x03]);

@@ -6,8 +6,8 @@ use std::{
 };
 
 use msg_core::{
-    ConsumerGroupId, ConsumerId, DeadLetterReason, DeliveryId, MessageEnvelope, MessageTimestamp,
-    Offset, PartitionId, RetryPolicy, Topic, TopicName,
+    ConsumerGroupId, ConsumerId, DeadLetterReason, DeliveryId, IdempotencyKey, MessageEnvelope,
+    MessageTimestamp, Offset, PartitionId, RetryPolicy, Topic, TopicName,
 };
 use msg_observability::metrics;
 use msg_storage::{LogConfig, PartitionLog as StoragePartitionLog, StoredMessageRecord};
@@ -26,6 +26,7 @@ use crate::{
         add_millis, advance_round_robin_partition, deterministic_delivery_id, keyed_partition,
         round_robin_partition,
     },
+    idempotency::{IdempotencyRecord, PublishFingerprint, conflict_error, is_equivalent_retry},
     state::{GroupPartitionState, GroupState, MessageRef, PendingDelivery, RetryEntry},
 };
 
@@ -147,6 +148,7 @@ pub struct DurableBroker {
     topics: BTreeMap<TopicName, DurableTopic>,
     state: DurableDeliveryState,
     state_log: StateLog,
+    idempotency_index: BTreeMap<(TopicName, IdempotencyKey), IdempotencyRecord>,
 }
 
 #[derive(Debug, Default)]
@@ -294,12 +296,14 @@ impl DurableBroker {
                 topics: BTreeMap::new(),
                 state: DurableDeliveryState::default(),
                 state_log,
+                idempotency_index: BTreeMap::new(),
             };
 
             for event in events {
                 broker.apply_recovered_event(event)?;
             }
             broker.recover_round_robin_state()?;
+            broker.recover_idempotency_state()?;
             broker.release_recovered_pending();
 
             info!(
@@ -436,6 +440,35 @@ impl DurableBroker {
 
         let result = (|| {
             let (topic_name, envelope) = command.into_parts();
+
+            // Idempotency check: if the envelope carries an idempotency key,
+            // look up the existing record BEFORE selecting a partition or
+            // advancing round-robin state. A duplicate retry must not alter
+            // future partition assignment or append another message.
+            let idempotency_key = envelope.idempotency_key().cloned();
+            if let Some(key) = &idempotency_key {
+                let lookup_key = (topic_name.clone(), key.clone());
+                if let Some(existing) = self.idempotency_index.get(&lookup_key) {
+                    if is_equivalent_retry(&topic_name, &envelope, existing) {
+                        // Equivalent retry — return the original identity
+                        // without appending or advancing round-robin.
+                        return Ok(PublishedMessage::replay(
+                            topic_name,
+                            existing.partition_id(),
+                            existing.offset(),
+                            existing.message_id().clone(),
+                        ));
+                    }
+                    // Conflicting reuse — reject without appending.
+                    return Err(conflict_error(&topic_name).into());
+                }
+            }
+
+            // No existing record — proceed with normal append.
+            let fingerprint = idempotency_key
+                .as_ref()
+                .map(|_| PublishFingerprint::compute(&topic_name, &envelope));
+
             let durable_topic =
                 self.topics
                     .get_mut(&topic_name)
@@ -455,28 +488,63 @@ impl DurableBroker {
                 durable_topic.advance_round_robin_partition();
             }
 
-            Ok(PublishedMessage::new(
-                topic_name,
-                partition_id,
-                offset,
-                message_id,
-            ))
+            let published =
+                PublishedMessage::new(topic_name.clone(), partition_id, offset, message_id);
+
+            // Register the idempotency record only after the append succeeds,
+            // so a failed append does not reserve the key.
+            if let (Some(key), Some(fp)) = (idempotency_key, fingerprint) {
+                self.idempotency_index.insert(
+                    (topic_name, key),
+                    IdempotencyRecord::new(
+                        fp,
+                        partition_id,
+                        offset,
+                        published.message_id().clone(),
+                    ),
+                );
+            }
+
+            Ok(published)
         })();
 
         match &result {
             Ok(message) => {
-                metrics::record_broker_publish("success");
-                info!(
-                    operation = "publish",
-                    status = "success",
-                    topic = %message.topic(),
-                    partition = message.partition_id().value(),
-                    offset = message.offset().value(),
-                    message_id = %message.message_id()
-                );
+                if message.deduplicated() {
+                    // A deduplicated retry does not append a new message.
+                    // Record the dedup counter; do NOT increment the
+                    // messages-published counter (which counts actual
+                    // appends only).
+                    metrics::record_broker_publish_deduplicated();
+                    info!(
+                        operation = "publish",
+                        status = "deduplicated",
+                        topic = %message.topic(),
+                        partition = message.partition_id().value(),
+                        offset = message.offset().value(),
+                        message_id = %message.message_id()
+                    );
+                } else {
+                    metrics::record_broker_publish("success");
+                    info!(
+                        operation = "publish",
+                        status = "success",
+                        topic = %message.topic(),
+                        partition = message.partition_id().value(),
+                        offset = message.offset().value(),
+                        message_id = %message.message_id()
+                    );
+                }
             }
             Err(error) => {
-                metrics::record_broker_publish("error");
+                if matches!(
+                    error,
+                    DurableBrokerError::Broker(BrokerError::IdempotencyKeyConflict { .. })
+                ) {
+                    metrics::record_broker_publish_idempotency_conflict();
+                } else {
+                    metrics::record_broker_publish("error");
+                }
                 warn!(
                     operation = "publish",
                     status = "error",
@@ -1491,6 +1559,73 @@ impl DurableBroker {
         Ok(())
     }
 
+    /// Rebuilds the in-memory idempotency index from durable stored messages.
+    ///
+    /// The message log is the single source of truth — no auxiliary index is
+    /// trusted. Records are scanned in deterministic canonical order: topic
+    /// (BTreeMap key order), then partition ID (ascending), then offset
+    /// (ascending within each partition). No global cross-partition append
+    /// order exists, so this triple defines the canonical "earliest" record.
+    ///
+    /// Historical duplicate handling:
+    /// - If a key appears multiple times with equivalent intent (same
+    ///   fingerprint), the earliest record by canonical order is canonical.
+    /// - If a key appears multiple times with conflicting intent (different
+    ///   fingerprint), broker open fails with `DurableBrokerError::Corruption`
+    ///   rather than silently choosing one.
+    ///
+    /// Existing data may contain repeated idempotency keys because the field
+    /// was previously metadata-only. This recovery does not repair or rewrite
+    /// existing data.
+    fn recover_idempotency_state(&mut self) -> DurableBrokerResult<()> {
+        for (topic_name, durable_topic) in &self.topics {
+            for partition_id in durable_topic.partition_ids().collect::<Vec<_>>() {
+                let partition_log = durable_topic
+                    .partition_log(partition_id)
+                    .expect("durable topic logs are opened from Topic partition ids");
+                let records = read_all_records(partition_log)?;
+                for record in records {
+                    let Some(key) = record.envelope.idempotency_key() else {
+                        continue;
+                    };
+                    let lookup_key = (topic_name.clone(), key.clone());
+                    let fingerprint = PublishFingerprint::compute(topic_name, &record.envelope);
+                    let new_record = IdempotencyRecord::new(
+                        fingerprint,
+                        record.partition,
+                        record.offset,
+                        record.envelope.id().clone(),
+                    );
+                    match self.idempotency_index.get(&lookup_key) {
+                        None => {
+                            self.idempotency_index.insert(lookup_key, new_record);
+                        }
+                        Some(existing) => {
+                            if existing.fingerprint() == new_record.fingerprint() {
+                                // Equivalent historical duplicate — the
+                                // earliest record by canonical order (already
+                                // stored) remains canonical. Keep it.
+                                continue;
+                            }
+                            // Conflicting historical duplicate — fail open
+                            // with a typed corruption error.
+                            return Err(corruption(format!(
+                                "conflicting idempotency key reuse detected for topic '{}' \
+                                 (partition {} offset {} conflicts with partition {} offset {})",
+                                topic_name,
+                                partition_id.value(),
+                                record.offset.value(),
+                                existing.partition_id().value(),
+                                existing.offset().value(),
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn release_recovered_pending(&mut self) {
         let recovered_pending: Vec<_> = self.state.pending.values().cloned().collect();
         self.state.pending.clear();
@@ -1700,6 +1835,9 @@ fn durable_error_kind(error: &DurableBrokerError) -> &'static str {
         DurableBrokerError::Broker(BrokerError::DeliveryNotFound { .. }) => "delivery_not_found",
         DurableBrokerError::Broker(BrokerError::InvalidConsumer { .. }) => "invalid_consumer",
         DurableBrokerError::Broker(BrokerError::InvalidConfig { .. }) => "invalid_config",
+        DurableBrokerError::Broker(BrokerError::IdempotencyKeyConflict { .. }) => {
+            "idempotency_key_conflict"
+        }
         DurableBrokerError::Storage(_) => "storage",
         DurableBrokerError::Io(_) => "io",
         DurableBrokerError::Serde(_) => "serde",

@@ -93,9 +93,10 @@ ferrumq nack delivery-1 --reason poison
 ```
 
 Publish generates `message_id` as `msg_${crypto.randomUUID()}` unless
-`--message-id` is provided. `--idempotency-key` is sent as message metadata only;
-the broker does not deduplicate publishes by that key yet. `--data` must be
-non-empty. Topic names, consumer groups, bounded identifiers, partition counts,
+`--message-id` is provided. `--idempotency-key` is scoped per topic: a retry
+with the same key and equivalent content returns the original publish result
+without appending another message. Conflicting reuse (same key, different
+content) fails with `IDEMPOTENCY_KEY_CONFLICT`. `--data` must be non-empty. Topic names, consumer groups, bounded identifiers, partition counts,
 consume limits, and lease values are validated before requests are sent.
 
 ## Output
@@ -112,7 +113,7 @@ Wrappers are:
 - `{ "health": ... }`, `{ "ready": ... }`, `{ "status": ... }`.
 - `{ "topic": ... }`, `{ "topics": [...] }`.
 - `{ "dlq": { "items": [...] } }`.
-- `{ "message": { "id", "topic", "partition", "offset" } }`.
+- `{ "message": { "id", "topic", "partition", "offset", "deduplicated" } }`.
 - `{ "messages": [...] }`.
 - `{ "ack": { "deliveryId", "consumerId" } }`.
 - `{ "nack": { "deliveryId", "consumerId", "reason" } }`.

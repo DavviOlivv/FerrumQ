@@ -31,4 +31,7 @@ pub enum BrokerError {
         field: &'static str,
         reason: &'static str,
     },
+
+    #[error("idempotency key conflict for topic {topic}")]
+    IdempotencyKeyConflict { topic: TopicName },
 }

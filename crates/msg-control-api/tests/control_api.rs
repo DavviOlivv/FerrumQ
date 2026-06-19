@@ -34,6 +34,8 @@ const ALL_METRIC_NAMES: &[&str] = &[
     metric_names::BROKER_RECOVERIES_TOTAL,
     metric_names::BROKER_TOPICS_CREATED_TOTAL,
     metric_names::BROKER_MESSAGES_PUBLISHED_TOTAL,
+    metric_names::BROKER_PUBLISH_DEDUPLICATED_TOTAL,
+    metric_names::BROKER_PUBLISH_IDEMPOTENCY_CONFLICTS_TOTAL,
     metric_names::BROKER_CONSUMES_TOTAL,
     metric_names::BROKER_DELIVERIES_CREATED_TOTAL,
     metric_names::BROKER_ACKS_TOTAL,

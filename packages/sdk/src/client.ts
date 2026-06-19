@@ -50,6 +50,7 @@ export interface PublishResult {
   partition: number;
   offset: string;
   messageId: string;
+  deduplicated: boolean;
 }
 
 export interface ConsumeRequest {
@@ -277,6 +278,7 @@ export class FerrumQClient {
         partition: response.partition,
         offset: response.offset,
         messageId: response.messageId,
+        deduplicated: response.deduplicated,
       };
     } catch (error) {
       throw this.wrapGrpcError(error, "publish", { topic: request.topic });
@@ -514,9 +516,18 @@ export class FerrumQClient {
       throw this.timeoutError(operation, context, error, grpcStatus);
     }
 
+    // Normalize idempotency key conflicts to a stable public application error
+    // code. The gRPC transport status (ALREADY_EXISTS) is preserved as
+    // grpcStatus, but the public code is IDEMPOTENCY_KEY_CONFLICT so callers
+    // can detect conflicts consistently across SDK and CLI.
+    const conflictCode =
+      grpcStatus === "ALREADY_EXISTS" && operation === "publish"
+        ? "IDEMPOTENCY_KEY_CONFLICT"
+        : grpcStatus;
+
     const options: ConstructorParameters<typeof FerrumQError>[1] = {
       transport: "grpc",
-      code: grpcStatus ?? "SDK_INVALID_RESPONSE",
+      code: conflictCode ?? "SDK_INVALID_RESPONSE",
       operation,
       ...context,
       cause: error,

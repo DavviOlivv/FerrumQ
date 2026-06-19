@@ -95,7 +95,7 @@ fn publish_request(message_id: &str) -> PublishRequest {
         r#type: "order.created".to_owned(),
         source: "/tests".to_owned(),
         subject: "subject-1".to_owned(),
-        idempotency_key: "idem-1".to_owned(),
+        idempotency_key: String::new(),
         time_unix_ms: 1_700_000_000_000,
     }
 }
@@ -378,7 +378,7 @@ async fn publish_rejects_empty_and_unknown_topics() {
 }
 
 #[tokio::test]
-async fn publish_uses_deterministic_key_partition_and_keeps_idempotency_metadata_only() {
+async fn publish_with_idempotency_key_deduplicates_equivalent_retries() {
     let (_root, service) = service_with_topic_and_partitions(3, Some(1_000), 4);
 
     let mut first = publish_request("message-1");
@@ -391,21 +391,103 @@ async fn publish_uses_deterministic_key_partition_and_keeps_idempotency_metadata
     let first = publish_response(&service, first).await;
     let second = publish_response(&service, second).await;
 
+    // Equivalent retry returns the same partition, offset, and message_id.
     assert_eq!(first.partition, second.partition);
-    assert_eq!(first.offset, 0);
-    assert_eq!(second.offset, 1);
+    assert_eq!(first.offset, second.offset);
+    assert_eq!(first.message_id, second.message_id);
+    // First publish is not deduplicated; retry is.
+    assert!(!first.deduplicated);
+    assert!(second.deduplicated);
 
+    // Only one message is stored.
     let messages = consume_messages(&service, consume_request(10)).await;
-    let ids: Vec<_> = messages
-        .iter()
-        .map(|message| message.message_id.as_str())
-        .collect();
-    assert_eq!(ids, ["message-1", "message-2"]);
-    assert!(
-        messages
-            .iter()
-            .all(|message| message.idempotency_key == "same-idempotency-key")
-    );
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message_id, "message-1");
+    assert_eq!(messages[0].idempotency_key, "same-idempotency-key");
+}
+
+#[tokio::test]
+async fn publish_without_idempotency_key_is_not_deduplicated() {
+    let (_root, service) = service_with_topic_and_partitions(3, Some(1_000), 4);
+
+    let mut first = publish_request("message-1");
+    first.idempotency_key.clear();
+    let mut second = publish_request("message-2");
+    second.idempotency_key.clear();
+
+    let first = publish_response(&service, first).await;
+    let second = publish_response(&service, second).await;
+
+    assert!(!first.deduplicated);
+    assert!(!second.deduplicated);
+    assert_ne!(first.offset, second.offset);
+}
+
+#[tokio::test]
+async fn publish_with_conflicting_idempotency_key_returns_already_exists() {
+    let (_root, service) = service_with_topic(3, Some(1_000));
+
+    let mut first = publish_request("message-1");
+    first.idempotency_key = "same-idempotency-key".to_owned();
+    let mut conflict = publish_request("message-2");
+    conflict.idempotency_key = "same-idempotency-key".to_owned();
+    conflict.payload = br#"{"different":true}"#.to_vec();
+
+    let first = publish_response(&service, first).await;
+    assert!(!first.deduplicated);
+
+    let result = service.publish(Request::new(conflict)).await;
+    assert_status(result, Code::AlreadyExists, "idempotency key conflict");
+}
+
+#[tokio::test]
+async fn publish_deduplication_survives_broker_reopen() {
+    let root = TempDir::new().unwrap();
+    let first = {
+        let mut broker = open_broker(&root, 3, Some(1_000));
+        create_topic_with_partitions(&mut broker, 3);
+        let service = DataPlaneService::new(broker);
+
+        let mut request = publish_request("message-1");
+        request.idempotency_key = "same-idempotency-key".to_owned();
+        publish_response(&service, request).await
+    };
+
+    // Reopen the broker from the same data directory.
+    let broker = open_broker(&root, 3, Some(1_000));
+    let service = DataPlaneService::new(broker);
+
+    let mut retry = publish_request("message-2");
+    retry.idempotency_key = "same-idempotency-key".to_owned();
+    let retry = publish_response(&service, retry).await;
+
+    assert!(retry.deduplicated);
+    assert_eq!(retry.partition, first.partition);
+    assert_eq!(retry.offset, first.offset);
+    assert_eq!(retry.message_id, first.message_id);
+}
+
+#[tokio::test]
+async fn publish_conflict_after_reopen_returns_already_exists() {
+    let root = TempDir::new().unwrap();
+    {
+        let mut broker = open_broker(&root, 3, Some(1_000));
+        create_topic_with_partitions(&mut broker, 1);
+        let service = DataPlaneService::new(broker);
+
+        let mut request = publish_request("message-1");
+        request.idempotency_key = "same-idempotency-key".to_owned();
+        publish_response(&service, request).await;
+    }
+
+    let broker = open_broker(&root, 3, Some(1_000));
+    let service = DataPlaneService::new(broker);
+
+    let mut conflict = publish_request("message-2");
+    conflict.idempotency_key = "same-idempotency-key".to_owned();
+    conflict.payload = br#"{"different":true}"#.to_vec();
+    let result = service.publish(Request::new(conflict)).await;
+    assert_status(result, Code::AlreadyExists, "idempotency key conflict");
 }
 
 #[tokio::test]
@@ -478,7 +560,7 @@ async fn consume_after_publish_returns_payload_and_metadata() {
     assert_eq!(message.r#type, "order.created");
     assert_eq!(message.source, "/tests");
     assert_eq!(message.subject, "subject-1");
-    assert_eq!(message.idempotency_key, "idem-1");
+    assert_eq!(message.idempotency_key, "");
     assert_eq!(message.time_unix_ms, 1_700_000_000_000);
     assert_eq!(message.consumer_group, "group.1");
     assert_eq!(message.consumer_id, "consumer-1");

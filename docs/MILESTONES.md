@@ -507,3 +507,65 @@ changes. No new release tag is part of this milestone. `.ferrumq/` remains
 ignored and untracked. Native fan-out, streaming consume, group cleanup,
 history controls, presence, authentication, and exactly-once delivery remain
 future work.
+
+## Milestone 14: Durable Publish Idempotency
+
+- Producer-side publish deduplication via `idempotency_key`.
+- SHA-256 deterministic intent fingerprint.
+- Equivalent retry returns original publish identity.
+- Conflicting reuse rejected with `IDEMPOTENCY_KEY_CONFLICT`.
+- Recovery-time index rebuild from durable message log.
+- Historical duplicate handling.
+- Protocol extension: `bool deduplicated = 5` on `PublishResponse`.
+- SDK `IDEMPOTENCY_KEY_CONFLICT` normalization.
+- CLI deduplication indicator and conflict error.
+- Observability counters for dedup and conflict.
+- ADR 0017.
+
+Status: implemented.
+
+Implemented scope:
+
+- `msg-broker/src/idempotency.rs`: `PublishFingerprint` (SHA-256 over canonical
+  length-prefixed encoding of topic, partition_key, payload, content_type,
+  event_type, source, subject, headers), `IdempotencyRecord`, and shared
+  helpers used by both the in-memory broker and the durable broker.
+- `BrokerError::IdempotencyKeyConflict { topic }` mapped to gRPC `ALREADY_EXISTS`.
+- `PublishedMessage` extended with `deduplicated()` accessor.
+- In-memory `BrokerService` checks idempotency before partition selection;
+  duplicate retries return the original identity without appending or advancing
+  round-robin state.
+- `DurableBroker` checks idempotency before partition selection and storage
+  append. Idempotency index is rebuilt from the message log during `open`
+  (canonical order: topic, then partition ID, then offset). Historical
+  equivalent duplicates keep the earliest record as canonical; conflicting
+  duplicates fail open with `DurableBrokerError::Corruption`.
+- Protobuf `PublishResponse.deduplicated` field 5.
+- `msg-data-plane` maps `IdempotencyKeyConflict` to
+  `Status::already_exists("idempotency key conflict")`.
+- Two labelless metrics: `ferrumq_broker_publish_deduplicated_total` and
+  `ferrumq_broker_publish_idempotency_conflicts_total`.
+- `ferrumq_broker_messages_published_total` counts actual appends only
+  (deduplicated retries do not increment it).
+- TypeScript protocol `DataPlanePublishResponse.deduplicated: boolean`.
+- SDK `PublishResult.deduplicated` and conflict normalization to
+  `FerrumQError.code === "IDEMPOTENCY_KEY_CONFLICT"` (preserving
+  `grpcStatus === "ALREADY_EXISTS"`).
+- CLI human output `(deduplicated)` suffix, JSON `deduplicated` field, and
+  `IDEMPOTENCY_KEY_CONFLICT` error on stderr for conflicts.
+- Help text explains topic-scoped idempotency key lifetime.
+- Integration tests for in-memory dedup, durable dedup, recovery, gRPC
+  adapter, SDK, and CLI.
+- Documentation updates across README, ARCHITECTURE, FAILURE_MODEL,
+  PROTOCOL, SDK, CLI, OBSERVABILITY, BROKER_STATE_FORMAT, RELEASE_CHECKLIST,
+  STORAGE_FORMAT, TESTING_STRATEGY, and ADR 0017.
+
+Deferred from Milestone 14:
+
+- Idempotency TTL or retention windows.
+- Idempotency record deletion.
+- Log compaction.
+- Exactly-once delivery.
+- Automatic SDK publish retries.
+- Clustering or replicated idempotency.
+- PostgreSQL or Redis-backed idempotency.

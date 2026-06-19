@@ -5,8 +5,9 @@ use msg_broker::{
     DlqQuery, NackCommand, PublishCommand,
 };
 use msg_core::{
-    ConsumerGroupId, ConsumerId, ContentType, DeadLetterReason, EventSource, EventType, MessageId,
-    MessageTimestamp, Offset, PartitionKey, RetryPolicy, TopicConfig, TopicName,
+    ConsumerGroupId, ConsumerId, ContentType, DeadLetterReason, EventSource, EventType,
+    IdempotencyKey, MessageId, MessageTimestamp, Offset, PartitionKey, RetryPolicy, TopicConfig,
+    TopicName,
 };
 
 fn timestamp(value: u64) -> MessageTimestamp {
@@ -482,4 +483,231 @@ fn public_observations_cover_available_pending_acked_retry_and_dlq_states() {
     let dlq = broker.list_dlq(DlqQuery::all()).unwrap();
     assert_eq!(dlq.len(), 1);
     assert_eq!(dlq[0].offset(), Offset::new(2));
+}
+
+fn idempotent_envelope(
+    id: impl AsRef<str>,
+    key: impl AsRef<str>,
+    payload: &[u8],
+) -> msg_core::MessageEnvelope {
+    msg_core::MessageEnvelope::builder(
+        MessageId::new(id.as_ref()).unwrap(),
+        EventSource::new("/tests").unwrap(),
+        EventType::new("order.created").unwrap(),
+        ContentType::new("application/json").unwrap(),
+        timestamp(1),
+        msg_core::MessagePayload::from_bytes(payload.to_vec()),
+    )
+    .idempotency_key(IdempotencyKey::new(key.as_ref()).unwrap())
+    .build()
+}
+
+fn publish_idempotent(
+    broker: &mut BrokerService,
+    id: impl AsRef<str>,
+    key: impl AsRef<str>,
+    payload: &[u8],
+) -> msg_broker::PublishedMessage {
+    broker
+        .publish(PublishCommand::new(
+            topic_name(),
+            idempotent_envelope(id, key, payload),
+        ))
+        .unwrap()
+}
+
+#[test]
+fn publish_without_idempotency_key_is_not_deduplicated() {
+    let mut broker = broker();
+    create_topic(&mut broker, 1);
+
+    let first = publish(&mut broker, "msg-1");
+    let second = publish(&mut broker, "msg-2");
+
+    assert!(!first.deduplicated());
+    assert!(!second.deduplicated());
+    assert_eq!(first.offset(), Offset::new(0));
+    assert_eq!(second.offset(), Offset::new(1));
+}
+
+#[test]
+fn first_publish_with_idempotency_key_is_not_deduplicated() {
+    let mut broker = broker();
+    create_topic(&mut broker, 1);
+
+    let result = publish_idempotent(&mut broker, "msg-1", "idem-1", br#"{"ok":true}"#);
+    assert!(!result.deduplicated());
+    assert_eq!(result.offset(), Offset::new(0));
+}
+
+#[test]
+fn equivalent_retry_returns_original_identity_and_is_deduplicated() {
+    let mut broker = broker();
+    create_topic(&mut broker, 3);
+
+    let first = publish_idempotent(&mut broker, "msg-original", "idem-1", br#"{"ok":true}"#);
+    let retry = publish_idempotent(&mut broker, "msg-retry", "idem-1", br#"{"ok":true}"#);
+
+    assert!(!first.deduplicated());
+    assert!(retry.deduplicated());
+    assert_eq!(retry.partition_id(), first.partition_id());
+    assert_eq!(retry.offset(), first.offset());
+    assert_eq!(retry.message_id(), first.message_id());
+}
+
+#[test]
+fn equivalent_retry_with_different_message_id_returns_original_message_id() {
+    let mut broker = broker();
+    create_topic(&mut broker, 1);
+
+    let _first = publish_idempotent(&mut broker, "msg-original", "idem-1", br#"{"ok":true}"#);
+    let retry = publish_idempotent(&mut broker, "msg-different", "idem-1", br#"{"ok":true}"#);
+
+    assert!(retry.deduplicated());
+    assert_eq!(retry.message_id().as_str(), "msg-original");
+}
+
+#[test]
+fn conflicting_reuse_of_idempotency_key_is_rejected() {
+    let mut broker = broker();
+    create_topic(&mut broker, 1);
+
+    publish_idempotent(&mut broker, "msg-1", "idem-1", br#"{"ok":true}"#);
+    let error = broker
+        .publish(PublishCommand::new(
+            topic_name(),
+            idempotent_envelope("msg-2", "idem-1", br#"{"different":true}"#),
+        ))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        BrokerError::IdempotencyKeyConflict { topic } if topic == topic_name()
+    ));
+}
+
+#[test]
+fn same_idempotency_key_on_different_topics_is_independent() {
+    let mut broker = broker();
+    let other_topic = TopicName::new("payments").unwrap();
+    broker
+        .create_topic(CreateTopicCommand::new(
+            topic_name(),
+            TopicConfig::new(1).unwrap(),
+        ))
+        .unwrap();
+    broker
+        .create_topic(CreateTopicCommand::new(
+            other_topic.clone(),
+            TopicConfig::new(1).unwrap(),
+        ))
+        .unwrap();
+
+    let first = publish_idempotent(&mut broker, "msg-1", "idem-1", br#"{"ok":true}"#);
+    let second = broker
+        .publish(PublishCommand::new(
+            other_topic.clone(),
+            idempotent_envelope("msg-2", "idem-1", br#"{"ok":true}"#),
+        ))
+        .unwrap();
+
+    assert!(!first.deduplicated());
+    assert!(!second.deduplicated());
+}
+
+#[test]
+fn different_key_with_identical_payload_is_not_deduplicated() {
+    let mut broker = broker();
+    create_topic(&mut broker, 1);
+
+    let first = publish_idempotent(&mut broker, "msg-1", "idem-1", br#"{"ok":true}"#);
+    let second = publish_idempotent(&mut broker, "msg-2", "idem-2", br#"{"ok":true}"#);
+
+    assert!(!first.deduplicated());
+    assert!(!second.deduplicated());
+    assert_ne!(first.offset(), second.offset());
+}
+
+#[test]
+fn duplicate_retry_does_not_advance_round_robin_partition() {
+    let mut broker = broker();
+    create_topic(&mut broker, 3);
+
+    // First unkeyed publish lands on partition 0 and advances to 1.
+    let a = publish(&mut broker, "msg-a");
+    assert_eq!(a.partition_id().value(), 0);
+
+    // Idempotent publish lands on partition 1 (next round-robin) and advances.
+    let b = publish_idempotent(&mut broker, "msg-b", "idem-1", br#"{"ok":true}"#);
+    assert_eq!(b.partition_id().value(), 1);
+
+    // Equivalent retry must return the same partition (1) and NOT advance
+    // round-robin to 2.
+    let retry = publish_idempotent(&mut broker, "msg-b-retry", "idem-1", br#"{"ok":true}"#);
+    assert!(retry.deduplicated());
+    assert_eq!(retry.partition_id().value(), 1);
+
+    // Next unkeyed publish must land on partition 2, proving round-robin was
+    // not advanced by the retry.
+    let c = publish(&mut broker, "msg-c");
+    assert_eq!(c.partition_id().value(), 2);
+}
+
+#[test]
+fn conflict_does_not_advance_round_robin_partition() {
+    let mut broker = broker();
+    create_topic(&mut broker, 3);
+
+    // First idempotent publish (unkeyed) lands on partition 0, advances to 1.
+    let a = publish_idempotent(&mut broker, "msg-a", "idem-1", br#"{"ok":true}"#);
+    assert_eq!(a.partition_id().value(), 0);
+
+    // Conflict must not advance round-robin (stays at 1).
+    let error = broker.publish(PublishCommand::new(
+        topic_name(),
+        idempotent_envelope("msg-b", "idem-1", br#"{"different":true}"#),
+    ));
+    assert!(error.is_err());
+
+    // Next unkeyed publish must land on partition 1, proving round-robin was
+    // not advanced by the conflict.
+    let c = publish(&mut broker, "msg-c");
+    assert_eq!(c.partition_id().value(), 1);
+}
+
+#[test]
+fn duplicate_retry_does_not_increase_topic_message_count() {
+    let mut broker = broker();
+    create_topic(&mut broker, 1);
+
+    publish_idempotent(&mut broker, "msg-1", "idem-1", br#"{"ok":true}"#);
+    publish_idempotent(&mut broker, "msg-1-retry", "idem-1", br#"{"ok":true}"#);
+    publish_idempotent(&mut broker, "msg-1-retry-2", "idem-1", br#"{"ok":true}"#);
+
+    let messages = consume(&mut broker, group_id(), consumer_id(), 100, 10);
+    assert_eq!(messages.len(), 1);
+}
+
+#[test]
+fn duplicate_retry_does_not_create_another_consumer_visible_delivery() {
+    let mut broker = broker();
+    create_topic(&mut broker, 1);
+
+    publish_idempotent(&mut broker, "msg-1", "idem-1", br#"{"ok":true}"#);
+
+    let first_batch = consume(&mut broker, group_id(), consumer_id(), 10, 10);
+    assert_eq!(first_batch.len(), 1);
+    broker
+        .ack(AckCommand::new(
+            first_batch[0].delivery_id().clone(),
+            consumer_id(),
+            timestamp(11),
+        ))
+        .unwrap();
+
+    // Retry the publish — it must be deduplicated and not create a new
+    // consumer-visible message.
+    publish_idempotent(&mut broker, "msg-1-retry", "idem-1", br#"{"ok":true}"#);
+    let second_batch = consume(&mut broker, group_id(), consumer_id(), 10, 12);
+    assert_eq!(second_batch.len(), 0);
 }

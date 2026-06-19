@@ -15,8 +15,9 @@ service FerrumQDataPlane {
 message PublishRequest {
   // Required by validation. Must name an existing topic.
   string topic = 1;
-  // Required by validation. FerrumQ currently stores this as message metadata;
-  // producer deduplication is not enforced by this API.
+  // Required by validation. Stored as message metadata. A retry with the same
+  // idempotency_key and equivalent intent returns the original message_id,
+  // not this value.
   string message_id = 2;
   // Optional partition key. Empty string means absent.
   string key = 3;
@@ -30,8 +31,11 @@ message PublishRequest {
   string source = 7;
   // Optional event subject. Empty string means absent.
   string subject = 8;
-  // Optional metadata only. Empty string means absent. No idempotent publish
-  // deduplication is performed in ferrumq.dataplane.v1.
+  // Optional idempotency key. Empty string means absent. When present, a
+  // subsequent publish with the same key and equivalent semantic intent is
+  // deduplicated to the original publish result. Conflicting reuse (same key,
+  // different intent) is rejected with ALREADY_EXISTS. The key is scoped by
+  // (topic, idempotency_key).
   string idempotency_key = 9;
   // Unix timestamp in milliseconds.
   uint64 time_unix_ms = 10;
@@ -42,6 +46,12 @@ message PublishResponse {
   uint32 partition = 2;
   uint64 offset = 3;
   string message_id = 4;
+  // True when this publish was deduplicated as an equivalent retry of a prior
+  // successful publish with the same idempotency key. False for a first
+  // successful publish or any publish without an idempotency key. The
+  // partition, offset, and message_id fields always represent the original
+  // stored message.
+  bool deduplicated = 5;
 }
 
 message ConsumeRequest {

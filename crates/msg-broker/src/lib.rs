@@ -4,6 +4,7 @@ pub mod delivery;
 pub mod durable;
 pub mod errors;
 pub(crate) mod helpers;
+pub mod idempotency;
 pub(crate) mod memory;
 pub(crate) mod state;
 
