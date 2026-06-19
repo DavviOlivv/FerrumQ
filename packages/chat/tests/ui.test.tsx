@@ -150,7 +150,7 @@ describe("ChatUi", () => {
     expect(vi.getTimerCount()).toBe(1);
 
     view.unmount();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.runAllTimersAsync();
     expect(vi.getTimerCount()).toBe(0);
   });
 
