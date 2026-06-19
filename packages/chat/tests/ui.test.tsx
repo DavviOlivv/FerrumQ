@@ -131,13 +131,22 @@ describe("ChatUi", () => {
 
   it("keeps one polling loop across equivalent and unrelated parent rerenders", async () => {
     vi.useFakeTimers();
+    let shutdown: (() => Promise<void>) | undefined;
     const Parent = ({
       label,
       config,
     }: {
       label: string;
       config: ChatUiConfig;
-    }) => <ChatUi config={config} onExit={() => label.length} />;
+    }) => (
+      <ChatUi
+        config={config}
+        onExit={() => label.length}
+        onShutdownReady={(value) => {
+          shutdown = value;
+        }}
+      />
+    );
     const view = render(<Parent label="first" config={baseConfig} />);
     await vi.advanceTimersByTimeAsync(0);
 
@@ -148,14 +157,15 @@ describe("ChatUi", () => {
     expect(FerrumQClient).toHaveBeenCalledOnce();
     expect(clientAt(0).consume).toHaveBeenCalledOnce();
 
-    const consumeCallsBeforeUnmount = clientAt(0).consume.mock.calls.length;
+    const consumeCallsBeforeShutdown = clientAt(0).consume.mock.calls.length;
 
+    await shutdown?.();
     view.unmount();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(FerrumQClient).toHaveBeenCalledOnce();
     expect(clientAt(0).consume.mock.calls.length).toBe(
-      consumeCallsBeforeUnmount,
+      consumeCallsBeforeShutdown,
     );
     expect(clientAt(0).close).toHaveBeenCalledOnce();
   });
