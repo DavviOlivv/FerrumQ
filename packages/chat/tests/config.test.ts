@@ -157,23 +157,23 @@ describe("duplicate flag rejection", () => {
 });
 
 describe("equals-form value edge cases", () => {
-  it("strips a leading equals from equals-form values", () => {
+  it("rejects a second equals at the start of a value", () => {
     const result = parseChatArgs(["--name==foo", "--room", "general"]);
-    expect("config" in result).toBe(true);
-    if ("config" in result) {
-      expect(result.config.name).toBe("foo");
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("invalid option syntax");
     }
   });
 
-  it("handles equals-form with empty value as empty string", () => {
+  it("rejects equals-form with an empty value", () => {
     const result = parseChatArgs(["--name=", "--room=general"]);
     expect("error" in result).toBe(true);
     if ("error" in result) {
-      expect(result.error).toContain("--name is required");
+      expect(result.error).toContain("--name requires a value");
     }
   });
 
-  it("handles equals-form URL with leading equals after ==", () => {
+  it("rejects URLs introduced with a double equals", () => {
     const result = parseChatArgs([
       "--name",
       "Alice",
@@ -181,9 +181,36 @@ describe("equals-form value edge cases", () => {
       "general",
       "--http-url==http://example.com",
     ]);
-    expect("config" in result).toBe(true);
-    if ("config" in result) {
-      expect(result.config.httpUrl).toBe("http://example.com");
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("invalid option syntax");
+    }
+  });
+
+  it.each([
+    ["--name", "--room"],
+    ["--room", "--http-url"],
+    ["--http-url", "--grpc-url"],
+    ["--grpc-url", "--timeout-ms"],
+  ])("rejects a missing value for %s", (flag, next) => {
+    const result = parseChatArgs([flag, next]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain(`${flag} requires a value`);
+    }
+  });
+
+  it("rejects flags that merely share a known prefix", () => {
+    const result = parseChatArgs([
+      ...requiredArgs,
+      "--name-extra=Alice",
+      "--timeout-msx",
+      "10",
+    ]);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("unknown option: --name-extra=Alice");
+      expect(result.error).toContain("unknown option: --timeout-msx");
     }
   });
 });

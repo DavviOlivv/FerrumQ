@@ -461,10 +461,13 @@ history-from-offset-0 replay. All participants receive expected messages through
 independent consumer groups. Session-local deduplication prevents double display.
 
 **Outage and recovery**: Broker unavailable at startup → error state, no polling.
-Outage during consume → exponential backoff cap at 30s, warnings coalesced,
-cleared on recovery. Publish failures → no automatic retry, unsent input
-preserved. Shutdown during backoff → immediate, no timer leaks. Permanent SDK
-errors → backoff applied to prevent busy loops.
+Timeout, non-shutdown cancellation, and transient gRPC failures during consume
+→ exponential backoff from `pollIntervalMs` to
+`max(30s, pollIntervalMs)`, warnings coalesced and cleared on recovery.
+Permanent configuration, validation, authorization, and invalid-response errors
+→ polling stops and the application enters error state. Publish failures → no
+automatic retry, unsent input preserved. Shutdown during backoff → immediate,
+no timer leaks.
 
 **Polling and timer correctness**: One consume RPC per session, normal and
 backoff delays bounded by Node.js safe timer limits, AbortController-based
@@ -473,21 +476,34 @@ cancellation, timers cleared on shutdown, fake-timer tests isolate state.
 **Lifecycle safety**: Equivalent config rerenders preserve the active session.
 Genuine config changes stop old generation before starting new one. Cleanup runs
 once per generation. Stale async callbacks cannot mutate the current generation.
-Shutdown is idempotent. Signal listeners are removed.
+Shutdown is idempotent. Publish is allowed only while connected. Duplicate start
+calls share one startup attempt. Signal listeners are removed.
 
-**Terminal safety**: OSC sequences, ANSI CSI, C0/C1 controls, bidirectional text
-override characters, and zero-width characters are stripped. Ordinary Unicode,
-Portuguese text, and emoji are preserved. Fields empty after sanitization follow
-the malformed-message path.
+**Terminal and payload safety**: Payloads are capped at 32 KiB before fatal
+UTF-8 decoding. OSC sequences, ANSI CSI, C0/C1 controls, DEL, bidi controls,
+BOM, zero-width space, and word joiner are stripped. ZWJ/ZWNJ remain when
+accompanied by visible content. Timestamps must be canonical UTC ISO 8601 and at
+most five minutes in the future. Fields empty after sanitization follow the
+malformed-message path.
 
 **Input and configuration**: CLI flags take precedence over env vars over defaults.
-Duplicate flags are rejected. Equals-form values are handled correctly including
-edge cases (`--name==foo` → `foo`). Unknown flags are flagged.
+Only exact `--flag value` and `--flag=value` forms are accepted. Duplicate
+flags, missing values, `--flag==value`, unknown flags, and non-decimal integers
+are rejected. SDK URL validation runs before UI rendering.
 
-**Portability**: Build scripts use Node.js APIs for chmod and binary detection
-(macOS compatible, graceful no-op on Windows). SIGTERM behavior is
-platform-dependent; Esc, Ctrl+C, unmount, and normal exit cleanup are correct
-on every supported platform.
+**Deduplication and UI bounds**: The strict 2048-entry LRU stores message ID plus
+SHA-256 fingerprint only after display acceptance. Identical content is
+deduplicated; conflicting content is warned, suppressed, and ACKed. The UI keeps
+500 messages in memory and renders the newest 200.
+
+**Portability**: A shared Node helper detects `brokerd`/`brokerd.exe`, builds the
+runtime when absent, and propagates cargo failure. Integration tests select the
+platform-specific suffix. Focused Windows CI validates install, SDK/chat
+typecheck, tests, build, and chat help smoke; broader Windows terminal support
+remains deferred.
 
 Broker semantics and protocol/storage formats were unchanged. No Rust crate
-changes. No release tag created. `.ferrumq/` remains ignored and untracked.
+changes. No new release tag is part of this milestone. `.ferrumq/` remains
+ignored and untracked. Native fan-out, streaming consume, group cleanup,
+history controls, presence, authentication, and exactly-once delivery remain
+future work.

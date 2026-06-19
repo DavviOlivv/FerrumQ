@@ -7,7 +7,12 @@ import path from "node:path";
 import { expect, test } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const brokerPath = path.join(repoRoot, "target/debug/brokerd");
+const brokerPath = path.join(
+  repoRoot,
+  "target",
+  "debug",
+  process.platform === "win32" ? "brokerd.exe" : "brokerd",
+);
 
 test("package entry works against brokerd serve-all", async (context) => {
   let process: ChildProcess | undefined;
@@ -17,7 +22,7 @@ test("package entry works against brokerd serve-all", async (context) => {
   try {
     if (!existsSync(brokerPath)) {
       throw new Error(
-        "target/debug/brokerd is missing; the SDK test preparation step did not build it",
+        `${brokerPath} is missing; the SDK test preparation step did not build it`,
       );
     }
 

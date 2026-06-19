@@ -92,6 +92,11 @@ then its corresponding environment variable (`FERRUMQ_HTTP_URL` or
 | Esc | Quit |
 | Ctrl+C | Quit (handled by Ink) |
 
+Only one publish is allowed in flight per UI generation. Repeated Enter presses
+are ignored until it settles. A successful publish removes only the submitted
+input snapshot, preserving characters typed while it was pending; a failed
+publish leaves the buffer intact for manual retry.
+
 ## Room/Topic Mapping
 
 Each room maps to a deterministic FerrumQ topic:
@@ -145,6 +150,9 @@ participant uses its own consumer group. This means:
 - New participants joining a room with existing messages will see the full
   topic history (all messages from offset 0) on first consume, because their
   consumer group starts fresh at offset 0.
+- Replay is intentionally incremental: each consume requests at most five
+  messages. Ignoring transport latency, replaying `history` messages therefore
+  takes approximately `ceil(history / 5) × pollIntervalMs`.
 - Session-local deduplication prevents duplicate display of the same
   application message ID, but does not provide exactly-once delivery.
 - There is no presence protocol — participants cannot see who is online.
@@ -188,9 +196,14 @@ Published to the broker with `type: "ferrumq.chat.message.v1"` and
 FerrumQ provides at-least-once delivery. Duplicate deliveries are possible.
 The chat application implements session-local deduplication:
 
-- In-memory LRU cache keyed by application message ID.
+- In-memory LRU cache keyed by application message ID and SHA-256 content
+  fingerprint.
 - Bounded to 2048 entries.
-- Duplicate deliveries are ACKed without displaying the message again.
+- The same ID with the same accepted content is a duplicate and is ACKed
+  without display.
+- The same ID with different accepted content is treated as a conflict: a
+  warning is emitted, the delivery is ACKed, and it is not rendered.
+- A message enters the cache only after the display callback accepts it.
 - This is **not exactly-once delivery** — it is a best-effort display guard.
 
 ### ACK Policy
@@ -215,11 +228,14 @@ The current data plane is unary (no streaming consume). The chat uses bounded
 polling:
 
 - Configurable poll interval (default: 500 ms).
-- Exponential backoff on transient broker errors (starting at 100 ms,
-  max 30 seconds).
+- Exponential backoff on timeouts, non-shutdown cancellation, and transient
+  gRPC statuses. The first retry uses `pollIntervalMs`; the cap is
+  `max(30 seconds, pollIntervalMs)`.
 - AbortController-based cancellation on shutdown.
 - Only one consume request per session is in flight at a time.
 - No tight busy loops, no unbounded recursion, no arbitrary fixed sleeps.
+- Configuration, validation, authorization, and other permanent errors stop
+  polling and move the application to an error state.
 
 ### Shutdown
 
@@ -233,18 +249,25 @@ polling:
 
 All external input is sanitized:
 
+- Broker payloads larger than 32 KiB are rejected before decoding, and UTF-8 is
+  decoded in fatal mode.
 - ANSI CSI sequences (`ESC[`) and OSC sequences (`ESC]...BEL`/`ESC]...ST`)
   are stripped from all received fields.
 - The complete C0 range (U+0000–U+001F), U+007F (DEL), and the complete C1
   range (U+0080–U+009F) are stripped.
-- Unicode bidirectional text override characters (U+200E–U+200F,
-  U+202A–U+202E, U+2066–U+2069) and zero-width characters (U+200B–U+200D,
-  U+FEFF) are stripped to prevent misleading terminal output.
+- Unicode bidirectional controls (including U+061C, U+200E–U+200F,
+  U+202A–U+202E, and U+2066–U+2069), BOM, zero-width space, and word joiner
+  are stripped to prevent misleading terminal output.
+- ZWNJ and ZWJ are preserved only when accompanied by visible content, so
+  normal scripts and joined emoji remain intact while invisible-only fields
+  are rejected.
 - Embedded newlines, carriage returns, and tabs are removed from external
   sender names and message text.
-- Display names and message text are truncated to their maximum lengths.
+- Oversized fields are rejected rather than truncated.
 - Any required field that becomes empty after sanitization triggers the
   malformed-message path.
+- `sentAt` must be canonical UTC ISO 8601 (`Date#toISOString()` form) and no
+  more than five minutes in the future.
 - Terminal control sequences injected by other participants cannot affect
   the local display.
 - Unicode, including Portuguese text and emoji, is preserved where the
@@ -267,8 +290,9 @@ All external input is sanitized:
 - **Malformed messages from broker**: Acked immediately, warning logged.
 - **Topic creation race**: `TOPIC_ALREADY_EXISTS` / `ALREADY_EXISTS` treated
   as success.
-- **Permanent errors (SDK configuration, serialization)**: Error emitted with
-  backoff applied; polling does not enter a busy loop.
+- **Permanent errors (configuration, validation, authorization, invalid
+  response)**: Polling stops, the SDK client closes, and the application moves
+  to an error state.
 - **Transparent reconnection is not supported**: If the broker goes down and
   restarts, the chat session does not automatically recover its consumer-group
   state. The user must restart the chat (`Esc`, then re-launch).
@@ -304,9 +328,11 @@ Do not use this chat for sensitive communication.
 - No non-interactive send/receive mode.
 - No transparent reconnection after broker restart.
 - Consumer groups accumulate indefinitely; no cleanup mechanism.
-- Platform support: developed and tested on Linux. SIGTERM behavior may differ
-  on Windows and macOS; Esc, Ctrl+C, unmount, and normal exit cleanup are
-  correct on every platform. Full Windows support is not validated by CI.
+- The UI retains at most 500 messages in memory and renders only the latest 200.
+- Platform support: Linux remains the primary development environment. CI also
+  validates Windows dependency installation, SDK/chat typecheck, tests, build,
+  and chat help smoke. This is a focused portability gate, not a claim of
+  unrestricted Windows terminal compatibility.
 
 ## Testing
 
@@ -315,5 +341,8 @@ Do not use this chat for sensitive communication.
   temporary data directory, creates two independent SDK clients, and verifies
   multi-client message delivery.
 - Unit tests cover domain validation, message parsing, sanitization,
-  deduplication, identity generation, and application lifecycle.
-- UI tests verify terminal rendering with mocked SDK.
+  deduplication conflicts, identity generation, lifecycle states, transient
+  versus permanent polling failures, and shutdown.
+- UI tests verify terminal rendering, slow publish serialization, input
+  preservation, stale-generation protection, and memory/render limits with a
+  mocked SDK.

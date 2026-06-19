@@ -5,12 +5,13 @@ import {
   buildChatMessage,
   DeduplicationCache,
   type DisplayMessage,
+  fingerprintChatMessage,
   type MalformedMessage,
   makeConsumerGroup,
   makeConsumerId,
   makeTopicName,
   type ParticipantIdentity,
-  parseChatMessage,
+  parseChatPayload,
   toDisplayMessage,
   validateName,
   validateRoom,
@@ -39,7 +40,17 @@ export interface ChatAppDeps {
   onDebug?: (message: string) => void;
 }
 
-const decoder = new TextDecoder();
+type ChatLifecycle = "idle" | "starting" | "connected" | "failed" | "stopped";
+
+const TRANSIENT_GRPC_STATUSES = new Set([
+  "CANCELLED",
+  "UNKNOWN",
+  "DEADLINE_EXCEEDED",
+  "RESOURCE_EXHAUSTED",
+  "ABORTED",
+  "INTERNAL",
+  "UNAVAILABLE",
+]);
 
 export class ChatApp {
   private readonly options: Required<ChatAppOptions>;
@@ -50,7 +61,8 @@ export class ChatApp {
   private client: FerrumQClient | null = null;
   private controller: AbortController | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
-  private stopped = false;
+  private lifecycle: ChatLifecycle = "idle";
+  private startPromise: Promise<void> | null = null;
   private pollBackoffMs = 0;
   private lastWarningText: string | null = null;
 
@@ -97,47 +109,69 @@ export class ChatApp {
     return makeTopicName(this.options.room);
   }
 
-  async start(): Promise<void> {
-    if (this.stopped) {
-      return;
+  start(): Promise<void> {
+    if (this.lifecycle === "starting") {
+      return this.startPromise ?? Promise.resolve();
+    }
+    if (this.lifecycle !== "idle") {
+      return Promise.resolve();
     }
 
+    this.lifecycle = "starting";
+    this.startPromise = this.performStart();
+    return this.startPromise;
+  }
+
+  private async performStart(): Promise<void> {
     this.emitState({ status: "connecting" });
 
     try {
-      this.client = new FerrumQClient({
+      const client = new FerrumQClient({
         httpUrl: this.options.httpUrl,
         grpcUrl: this.options.grpcUrl,
         timeoutMs: this.options.timeoutMs,
       });
+      this.client = client;
 
-      await this.client.health();
-      await this.client.readiness();
+      await client.health();
+      if (!this.isStartingWith(client)) return;
+      await client.readiness();
+      if (!this.isStartingWith(client)) return;
 
-      await this.ensureTopic();
+      await this.ensureTopic(client);
+      if (!this.isStartingWith(client)) return;
 
+      this.lifecycle = "connected";
       this.emitState({ status: "connected" });
       this.controller = new AbortController();
       this.schedulePoll();
     } catch (error) {
+      if (this.lifecycle === "stopped") {
+        return;
+      }
       const startupError = errorMessage(error);
-      this.cleanup();
+      this.lifecycle = "failed";
+      this.cleanupResources();
       this.emitState({
         status: "error",
         message: startupError,
       });
       this.emitError(`Failed to connect: ${startupError}`);
+    } finally {
+      this.startPromise = null;
     }
   }
 
   async stop(): Promise<void> {
-    this.cleanup();
+    if (this.lifecycle === "stopped") {
+      return;
+    }
+    this.lifecycle = "stopped";
+    this.cleanupResources();
     this.emitState({ status: "disconnected" });
   }
 
-  private cleanup(): void {
-    this.stopped = true;
-
+  private cleanupResources(): void {
     if (this.pollTimer !== null) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
@@ -160,16 +194,17 @@ export class ChatApp {
   }
 
   async sendMessage(text: string): Promise<boolean> {
-    if (this.stopped || this.client === null) {
+    if (this.lifecycle !== "connected" || this.client === null) {
       this.emitError("Not connected");
       return false;
     }
 
+    const client = this.client;
     try {
       const chatMsg = buildChatMessage(this.identity, this.options.room, text);
       const payload = JSON.stringify(chatMsg);
 
-      await this.client.publish({
+      await client.publish({
         topic: this.topicName,
         payload,
         type: "ferrumq.chat.message.v1",
@@ -178,22 +213,27 @@ export class ChatApp {
 
       return true;
     } catch (error) {
+      if (this.isStopped()) {
+        return false;
+      }
       this.emitError(`Failed to send message: ${errorMessage(error)}`);
       return false;
     }
   }
 
-  private async ensureTopic(): Promise<void> {
-    if (this.client === null) {
+  private async ensureTopic(client: FerrumQClient): Promise<void> {
+    if (!this.isStartingWith(client)) {
       return;
     }
 
     try {
-      await this.client.createTopic({
+      await client.createTopic({
         name: this.topicName,
         partitions: 1,
       });
-      this.deps.onDebug?.(`Created topic ${this.topicName}`);
+      if (this.isStartingWith(client)) {
+        this.deps.onDebug?.(`Created topic ${this.topicName}`);
+      }
     } catch (error) {
       if (
         error instanceof FerrumQError &&
@@ -208,37 +248,45 @@ export class ChatApp {
   }
 
   private schedulePoll(): void {
-    if (this.stopped) {
+    if (this.lifecycle !== "connected" || this.pollTimer !== null) {
       return;
     }
 
     const delay = this.nextPollDelay();
 
     this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
       this.poll().catch((err) => {
-        this.emitError(`Poll error: ${errorMessage(err)}`);
+        if (this.lifecycle === "connected") {
+          this.failPolling(`Poll error: ${errorMessage(err)}`);
+        }
       });
     }, delay);
   }
 
   private async poll(): Promise<void> {
-    if (this.stopped || this.client === null) {
+    if (this.lifecycle !== "connected" || this.client === null) {
       return;
     }
 
+    const client = this.client;
     const signal = this.controller?.signal;
     if (signal?.aborted) {
       return;
     }
 
     try {
-      const deliveries = await this.client.consume({
+      const deliveries = await client.consume({
         topic: this.topicName,
         group: this.consumerGroup,
         consumerId: this.consumerId,
         maxMessages: 5,
         leaseMs: 30_000,
       });
+
+      if (!this.isConnectedWith(client) || signal?.aborted) {
+        return;
+      }
 
       this.pollBackoffMs = 0;
 
@@ -248,12 +296,11 @@ export class ChatApp {
       }
 
       for (const delivery of deliveries) {
-        if (this.stopped || signal?.aborted) {
+        if (!this.isConnectedWith(client) || signal?.aborted) {
           break;
         }
 
-        const rawText = decoder.decode(delivery.payload);
-        const parsed = parseChatMessage(rawText);
+        const parsed = parseChatPayload(delivery.payload);
 
         if ("kind" in parsed) {
           await this.handleMalformedMessage(delivery.deliveryId, parsed);
@@ -267,43 +314,53 @@ export class ChatApp {
           continue;
         }
 
-        if (this.dedup.has(parsed.id)) {
+        const fingerprint = fingerprintChatMessage(parsed);
+        const deduplication = this.dedup.observe(parsed.id, fingerprint);
+        if (deduplication === "duplicate") {
+          await this.ackDelivery(delivery.deliveryId);
+          continue;
+        }
+        if (deduplication === "conflict") {
+          this.emitWarning(
+            `Skipping conflicting chat message ID ${parsed.id}: delivery ${delivery.deliveryId}`,
+          );
           await this.ackDelivery(delivery.deliveryId);
           continue;
         }
 
-        this.dedup.add(parsed.id);
         const display = toDisplayMessage(parsed, this.identity.sessionId);
         this.deps.onMessage(display);
+        this.dedup.add(parsed.id, fingerprint);
 
         await this.ackDelivery(delivery.deliveryId);
       }
     } catch (error) {
-      if (this.stopped || signal?.aborted) {
+      if (
+        !this.isConnectedWith(client) ||
+        signal?.aborted ||
+        this.client !== client
+      ) {
         return;
       }
 
-      if (error instanceof FerrumQError) {
-        if (error.code === "SDK_CLIENT_CLOSED") {
-          return;
-        }
-        if (error.transport === "http" || error.transport === "grpc") {
-          this.applyBackoff();
-          this.emitWarning(`Broker unavailable: ${error.message}`);
-        } else if (error.code === "SDK_TIMEOUT") {
-          this.applyBackoff();
-          this.emitWarning(`Consume timed out: ${error.message}`);
-        } else {
-          this.emitError(`Chat error: ${error.message}`);
-          return;
-        }
+      const classification = classifyConsumeError(error);
+      if (classification === "timeout") {
+        this.applyBackoff();
+        this.emitWarning(`Consume timed out: ${errorMessage(error)}`);
+      } else if (classification === "transient") {
+        this.applyBackoff();
+        this.emitWarning(`Broker unavailable: ${errorMessage(error)}`);
       } else {
-        this.emitError(`Unexpected error: ${errorMessage(error)}`);
+        this.failPolling(
+          error instanceof FerrumQError
+            ? `Chat error: ${error.message}`
+            : `Unexpected error: ${errorMessage(error)}`,
+        );
         return;
       }
     }
 
-    if (!this.stopped && !signal?.aborted) {
+    if (this.lifecycle === "connected" && !signal?.aborted) {
       this.schedulePoll();
     }
   }
@@ -318,29 +375,37 @@ export class ChatApp {
     );
 
     try {
-      if (this.client !== null) {
-        await this.client.ack({
+      const client = this.client;
+      if (this.lifecycle === "connected" && client !== null) {
+        await client.ack({
           deliveryId,
           consumerId: this.consumerId,
         });
       }
     } catch {
-      this.emitWarning(
-        `Could not ACK malformed message delivery ${deliveryId}`,
-      );
+      if (this.lifecycle === "connected") {
+        this.emitWarning(
+          `Could not ACK malformed message delivery ${deliveryId}`,
+        );
+      }
     }
   }
 
   private async ackDelivery(deliveryId: string): Promise<void> {
     try {
-      if (this.client !== null) {
-        await this.client.ack({
+      const client = this.client;
+      if (this.lifecycle === "connected" && client !== null) {
+        await client.ack({
           deliveryId,
           consumerId: this.consumerId,
         });
       }
     } catch (error) {
-      this.emitWarning(`ACK failed for ${deliveryId}: ${errorMessage(error)}`);
+      if (this.lifecycle === "connected") {
+        this.emitWarning(
+          `ACK failed for ${deliveryId}: ${errorMessage(error)}`,
+        );
+      }
     }
   }
 
@@ -348,7 +413,7 @@ export class ChatApp {
     const cap = Math.max(30_000, this.options.pollIntervalMs);
 
     if (this.pollBackoffMs === 0) {
-      this.pollBackoffMs = Math.max(this.options.pollIntervalMs, 100);
+      this.pollBackoffMs = this.options.pollIntervalMs;
     } else {
       this.pollBackoffMs =
         this.pollBackoffMs >= cap / 2
@@ -378,6 +443,48 @@ export class ChatApp {
     this.lastWarningText = message;
     this.deps.onWarning(message);
   }
+
+  private isStartingWith(client: FerrumQClient): boolean {
+    return this.lifecycle === "starting" && this.client === client;
+  }
+
+  private isConnectedWith(client: FerrumQClient): boolean {
+    return this.lifecycle === "connected" && this.client === client;
+  }
+
+  private isStopped(): boolean {
+    return this.lifecycle === "stopped";
+  }
+
+  private failPolling(message: string): void {
+    if (this.lifecycle !== "connected") {
+      return;
+    }
+    this.lifecycle = "failed";
+    this.cleanupResources();
+    this.emitState({ status: "error", message });
+    this.emitError(message);
+  }
+}
+
+type ConsumeErrorClassification = "timeout" | "transient" | "permanent";
+
+function classifyConsumeError(error: unknown): ConsumeErrorClassification {
+  if (!(error instanceof FerrumQError)) {
+    return "permanent";
+  }
+  if (error.code === "SDK_TIMEOUT") {
+    return "timeout";
+  }
+  if (error.transport !== "grpc") {
+    return "permanent";
+  }
+
+  const status = error.grpcStatus ?? error.code;
+  if (status === undefined || TRANSIENT_GRPC_STATUSES.has(status)) {
+    return "transient";
+  }
+  return "permanent";
 }
 
 function errorMessage(error: unknown): string {

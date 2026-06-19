@@ -227,4 +227,23 @@ describe("runChatCli shutdown lifecycle", () => {
       expect.stringContaining("unknown option"),
     );
   });
+
+  it.each([
+    ["--http-url", "http://127.0.0.1:8080/api", "Invalid broker configuration"],
+    ["--grpc-url", "http://127.0.0.1", "Invalid broker configuration"],
+  ])("validates %s before rendering the UI", async (flag, value, message) => {
+    const fixture = createRuntime();
+    const result = await runChatCli(
+      ["--name", "Alice", "--room", "general", flag, value],
+      output,
+      {},
+      fixture.runtime,
+    );
+
+    expect(result).toBe(1);
+    expect(output.writeError).toHaveBeenCalledWith(
+      expect.stringContaining(message),
+    );
+    expect(fixture.runtime.render).not.toHaveBeenCalled();
+  });
 });

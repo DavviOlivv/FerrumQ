@@ -61,7 +61,11 @@ If the broker cannot be reached during `start()` (health check, readiness, or to
 
 ### Broker Outage During Operation
 
-When consume fails with a transport error (HTTP or gRPC), exponential backoff is applied and a warning is displayed. Repeated identical outage warnings are coalesced — only the first warning is emitted. When a subsequent consume succeeds, the warning is cleared. Backoff caps at `max(30_000, pollIntervalMs)` ms.
+When consume times out, is cancelled independently of shutdown, or fails with a
+transient gRPC status, exponential backoff is applied and a warning is
+displayed. Repeated identical outage warnings are coalesced. A successful
+consume resets the backoff and clears the warning. The first retry uses
+`pollIntervalMs`; backoff caps at `max(30_000, pollIntervalMs)` ms.
 
 Shutdown during backoff is immediate: pending timer is cleared, AbortController is signaled, and the SDK client is closed.
 
@@ -69,7 +73,9 @@ Publish failures are not retried — an error is displayed and unsent input is p
 
 ### Permanent Errors
 
-Errors with transport `sdk` (configuration, serialization, invalid response) are treated like transport errors for backoff purposes to prevent busy loops, but emit an error message rather than a warning.
+Configuration, validation, authorization, invalid-response, and other
+non-transient errors stop polling, close the SDK client, and move the
+application to an error state. They are not retried.
 
 ### Transparent Reconnection
 
@@ -78,3 +84,8 @@ The chat does **not** transparently reconnect after a broker restart. If the bro
 ### Malformed Messages
 
 Messages that fail parsing or validation are ACKed (not NACKed) and a concise warning is emitted. This prevents infinite redelivery loops. Malformed messages never enter the deduplication cache and never appear as React keys.
+
+Payloads are limited to 32 KiB before fatal UTF-8 decoding. Accepted timestamps
+must be canonical UTC ISO 8601 and no more than five minutes in the future.
+Duplicate IDs are compared with a SHA-256 fingerprint: identical content is
+deduplicated, while conflicting content is warned, suppressed, and ACKed.

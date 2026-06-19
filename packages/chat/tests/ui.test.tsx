@@ -1,7 +1,12 @@
 import { FerrumQClient } from "@ferrumq/sdk";
 import { render } from "ink-testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatUi, type ChatUiConfig } from "../src/ui.js";
+import {
+  appendMessageHistory,
+  ChatUi,
+  type ChatUiConfig,
+  MAX_MESSAGE_HISTORY,
+} from "../src/ui.js";
 
 interface MockClient {
   health: ReturnType<typeof vi.fn>;
@@ -296,6 +301,148 @@ describe("ChatUi", () => {
     await flushEffects();
     expect(client.close).toHaveBeenCalledOnce();
   });
+
+  it("blocks repeated Enter while a publish is pending", async () => {
+    const view = render(<ChatUi config={baseConfig} />);
+    await flushEffects();
+    const publish = deferred<void>();
+    clientAt(0).publish.mockImplementationOnce(() => publish.promise);
+
+    view.stdin.write("hello\r");
+    await flushEffects();
+    view.stdin.write("\r");
+    await flushEffects();
+
+    expect(clientAt(0).publish).toHaveBeenCalledOnce();
+    expect(view.lastFrame() ?? "").toContain("hello");
+    expect(view.lastFrame() ?? "").toContain("sending");
+
+    publish.resolve();
+    await flushEffects();
+    expect(view.lastFrame() ?? "").not.toContain("> hello");
+    view.unmount();
+  });
+
+  it("removes only the submitted snapshot after a slow publish succeeds", async () => {
+    const view = render(<ChatUi config={baseConfig} />);
+    await flushEffects();
+    const publish = deferred<void>();
+    clientAt(0).publish.mockImplementationOnce(() => publish.promise);
+
+    view.stdin.write("hello");
+    await flushEffects();
+    view.stdin.write("\r");
+    await flushEffects();
+    view.stdin.write(" world");
+    await flushEffects();
+    expect(view.lastFrame() ?? "").toContain("hello world");
+
+    publish.resolve();
+    await flushEffects();
+    expect(view.lastFrame() ?? "").toContain(">  world|");
+    view.unmount();
+  });
+
+  it("preserves the complete input when publish fails", async () => {
+    const view = render(<ChatUi config={baseConfig} />);
+    await flushEffects();
+    clientAt(0).publish.mockRejectedValueOnce(new Error("offline"));
+
+    view.stdin.write("retry me");
+    await flushEffects();
+    view.stdin.write("\r");
+    await flushEffects();
+
+    expect(clientAt(0).publish).toHaveBeenCalledOnce();
+    expect(view.lastFrame() ?? "").toContain("> retry me|");
+    expect(view.lastFrame() ?? "").toContain("Failed to send message: offline");
+    view.unmount();
+  });
+
+  it("does not let an old publish mutate a replacement generation", async () => {
+    const view = render(<ChatUi config={baseConfig} />);
+    await flushEffects();
+    const publish = deferred<void>();
+    clientAt(0).publish.mockImplementationOnce(() => publish.promise);
+
+    view.stdin.write("old");
+    await flushEffects();
+    view.stdin.write("\r");
+    await flushEffects();
+
+    view.rerender(<ChatUi config={{ ...baseConfig, room: "engineering" }} />);
+    await flushEffects();
+    view.stdin.write("new");
+    await flushEffects();
+
+    publish.resolve();
+    await flushEffects();
+
+    expect(view.lastFrame() ?? "").toContain("engineering");
+    expect(view.lastFrame() ?? "").toContain("> new|");
+    view.unmount();
+  });
+
+  it("renders only the 200 most recent messages", async () => {
+    vi.useFakeTimers();
+    const view = render(<ChatUi config={baseConfig} />);
+    await vi.advanceTimersByTimeAsync(0);
+    clientAt(0).consume.mockResolvedValueOnce(
+      Array.from({ length: 205 }, (_, index) => ({
+        deliveryId: `delivery-${index}`,
+        payload: new TextEncoder().encode(
+          JSON.stringify({
+            version: 1,
+            id: `id-${index}`,
+            room: "general",
+            sender: { id: "bob", name: "Bob", sessionId: "bob-session" },
+            text: `msg-${String(index).padStart(4, "0")}`,
+            sentAt: "2025-01-01T00:00:00.000Z",
+          }),
+        ),
+      })),
+    );
+
+    await vi.advanceTimersByTimeAsync(500);
+    await flushMicrotasks(220);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clientAt(0).consume).toHaveBeenCalledOnce();
+    expect(clientAt(0).ack).toHaveBeenCalledTimes(205);
+    const frame = view.lastFrame() ?? "";
+    expect(frame).not.toContain("msg-0004");
+    expect(frame).toContain("msg-0005");
+    expect(frame).toContain("msg-0204");
+    view.unmount();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+});
+
+describe("appendMessageHistory", () => {
+  it("keeps a strict 500-message in-memory limit", () => {
+    const messages = Array.from({ length: MAX_MESSAGE_HISTORY + 1 }).reduce<
+      Array<{
+        id: string;
+        senderName: string;
+        text: string;
+        timestamp: Date;
+        isSelf: boolean;
+      }>
+    >(
+      (history, _, index) =>
+        appendMessageHistory(history, {
+          id: `id-${index}`,
+          senderName: "Alice",
+          text: `message-${index}`,
+          timestamp: new Date(0),
+          isSelf: false,
+        }),
+      [],
+    );
+
+    expect(messages).toHaveLength(MAX_MESSAGE_HISTORY);
+    expect(messages[0]?.id).toBe("id-1");
+    expect(messages.at(-1)?.id).toBe(`id-${MAX_MESSAGE_HISTORY}`);
+  });
 });
 
 function clients(): MockClient[] {
@@ -314,4 +461,21 @@ function clientAt(index: number): MockClient {
 
 async function flushEffects(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((value) => {
+    resolve = value;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks(count: number): Promise<void> {
+  for (let index = 0; index < count; index++) {
+    await Promise.resolve();
+  }
 }

@@ -74,6 +74,23 @@ describe("validateOptions", () => {
     ).toThrow(FerrumQError);
   });
 
+  it.each([
+    "http://127.0.0.1:8080/api",
+    "http://127.0.0.1:8080/?debug=true",
+    "http://127.0.0.1:8080/#status",
+  ])("rejects httpUrl with non-origin components: %s", (httpUrl) => {
+    expect(() =>
+      validateOptions({
+        httpUrl,
+        grpcUrl: "http://127.0.0.1:9090",
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "SDK_CONFIGURATION",
+      }),
+    );
+  });
+
   it("rejects ftp httpUrl protocol", () => {
     expect(() =>
       validateOptions({

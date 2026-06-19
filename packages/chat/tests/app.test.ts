@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatApp, type ChatAppDeps } from "../src/app.js";
+import { MAX_CHAT_PAYLOAD_BYTES } from "../src/domain.js";
 
 const mockClient = {
   health: vi.fn(),
@@ -186,6 +187,96 @@ describe("ChatApp", () => {
     await app.stop();
   });
 
+  it("shares one startup attempt across duplicate start calls", async () => {
+    let resolveHealth!: (value: { status: string }) => void;
+    mockClient.health.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = resolve;
+        }),
+    );
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+      },
+      deps,
+    );
+
+    const first = app.start();
+    const second = app.start();
+    expect(mockClient.health).toHaveBeenCalledOnce();
+
+    resolveHealth({ status: "ok" });
+    await Promise.all([first, second]);
+    expect(mockClient.readiness).toHaveBeenCalledOnce();
+    expect(mockClient.createTopic).toHaveBeenCalledOnce();
+    await app.stop();
+  });
+
+  it("does not publish while startup is still in progress", async () => {
+    let resolveHealth!: (value: { status: string }) => void;
+    mockClient.health.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = resolve;
+        }),
+    );
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+      },
+      deps,
+    );
+
+    const start = app.start();
+    await expect(app.sendMessage("too early")).resolves.toBe(false);
+    expect(mockClient.publish).not.toHaveBeenCalled();
+
+    resolveHealth({ status: "ok" });
+    await start;
+    await app.stop();
+  });
+
+  it("does not emit startup callbacks after stop", async () => {
+    let resolveHealth!: (value: { status: string }) => void;
+    mockClient.health.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = resolve;
+        }),
+    );
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+      },
+      deps,
+    );
+
+    const start = app.start();
+    await app.stop();
+    resolveHealth({ status: "ok" });
+    await start;
+
+    expect(deps.states).toEqual([
+      { status: "connecting" },
+      { status: "disconnected" },
+    ]);
+    expect(mockClient.readiness).not.toHaveBeenCalled();
+    expect(mockClient.close).toHaveBeenCalledOnce();
+  });
+
   it("stops cleanly", async () => {
     const deps = createDeps();
     const app = new ChatApp(
@@ -354,7 +445,7 @@ describe("ChatApp", () => {
           state.status === "disconnected"
         );
       }),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it("suppresses close failures during repeated shutdown", async () => {
@@ -522,6 +613,134 @@ describe("ChatApp", () => {
     }
   });
 
+  it("ACKs invalid UTF-8 and oversized payloads as malformed", async () => {
+    vi.useFakeTimers();
+    mockClient.consume.mockResolvedValueOnce([
+      {
+        deliveryId: "delivery-utf8",
+        payload: new Uint8Array([0xc3, 0x28]),
+      },
+      {
+        deliveryId: "delivery-large",
+        payload: new Uint8Array(MAX_CHAT_PAYLOAD_BYTES + 1),
+      },
+    ]);
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 1,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(deps.messages).toEqual([]);
+      expect(mockClient.ack).toHaveBeenCalledTimes(2);
+      expect(deps.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("(invalid-utf8)"),
+          expect.stringContaining("(payload-too-large)"),
+        ]),
+      );
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("warns, suppresses, and ACKs conflicting content with the same ID", async () => {
+    vi.useFakeTimers();
+    const encode = (text: string) =>
+      new TextEncoder().encode(
+        JSON.stringify({
+          version: 1,
+          id: "shared-id",
+          room: "general",
+          sender: { id: "p1", name: "Bob", sessionId: "s1" },
+          text,
+          sentAt: "2025-01-01T00:00:00.000Z",
+        }),
+      );
+    mockClient.consume.mockResolvedValueOnce([
+      { deliveryId: "delivery-original", payload: encode("original") },
+      { deliveryId: "delivery-conflict", payload: encode("changed") },
+    ]);
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 1,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(deps.messages).toHaveLength(1);
+      expect(mockClient.ack).toHaveBeenCalledTimes(2);
+      expect(deps.warnings).toContain(
+        "Skipping conflicting chat message ID shared-id: delivery delivery-conflict",
+      );
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not ACK or deduplicate until the display callback accepts a message", async () => {
+    vi.useFakeTimers();
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        version: 1,
+        id: "display-failure",
+        room: "general",
+        sender: { id: "p1", name: "Bob", sessionId: "s1" },
+        text: "hello",
+        sentAt: "2025-01-01T00:00:00.000Z",
+      }),
+    );
+    mockClient.consume.mockResolvedValueOnce([
+      { deliveryId: "delivery-display", payload },
+    ]);
+    const deps = createDeps();
+    deps.onMessage = () => {
+      throw new Error("display rejected");
+    };
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 1,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(mockClient.ack).not.toHaveBeenCalled();
+      expect(deps.errors).toContain("Unexpected error: display rejected");
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("uses the normal 500 ms interval as the first failure delay", async () => {
     vi.useFakeTimers();
     const { FerrumQError } = await import("@ferrumq/sdk");
@@ -682,7 +901,7 @@ describe("ChatApp", () => {
     }
   });
 
-  it("never creates a busy loop during repeated failures", async () => {
+  it("uses the configured interval as the lower bound without zero-delay retries", async () => {
     vi.useFakeTimers();
     const { FerrumQError } = await import("@ferrumq/sdk");
     mockClient.consume.mockRejectedValue(
@@ -703,10 +922,12 @@ describe("ChatApp", () => {
       await app.start();
       await vi.advanceTimersByTimeAsync(1);
       expect(mockClient.consume).toHaveBeenCalledOnce();
-      await vi.advanceTimersByTimeAsync(99);
-      expect(mockClient.consume).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(1);
       expect(mockClient.consume).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(mockClient.consume).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(4);
+      expect(mockClient.consume).toHaveBeenCalledTimes(4);
     } finally {
       await app.stop();
       vi.useRealTimers();
@@ -970,6 +1191,87 @@ describe("ChatApp", () => {
 
       await vi.advanceTimersByTimeAsync(1);
       expect(mockClient.consume).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    "CANCELLED",
+    "UNAVAILABLE",
+    "RESOURCE_EXHAUSTED",
+  ])("retries transient gRPC status %s with backoff", async (grpcStatus) => {
+    vi.useFakeTimers();
+    const { FerrumQError } = await import("@ferrumq/sdk");
+    mockClient.consume.mockRejectedValue(
+      new FerrumQError(grpcStatus, {
+        transport: "grpc",
+        code: grpcStatus,
+        grpcStatus,
+      }),
+    );
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 100,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(mockClient.consume).toHaveBeenCalledTimes(2);
+      expect(deps.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("Broker unavailable:"),
+        ]),
+      );
+    } finally {
+      await app.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    "INVALID_ARGUMENT",
+    "PERMISSION_DENIED",
+    "UNAUTHENTICATED",
+  ])("stops polling on permanent gRPC status %s", async (grpcStatus) => {
+    vi.useFakeTimers();
+    const { FerrumQError } = await import("@ferrumq/sdk");
+    mockClient.consume.mockRejectedValue(
+      new FerrumQError(grpcStatus, {
+        transport: "grpc",
+        code: grpcStatus,
+        grpcStatus,
+      }),
+    );
+    const deps = createDeps();
+    const app = new ChatApp(
+      {
+        httpUrl: "http://127.0.0.1:8080",
+        grpcUrl: "http://127.0.0.1:9090",
+        room: "general",
+        name: "Alice",
+        pollIntervalMs: 100,
+      },
+      deps,
+    );
+
+    try {
+      await app.start();
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.runAllTimersAsync();
+      expect(mockClient.consume).toHaveBeenCalledOnce();
+      expect(deps.errors).toContain(`Chat error: ${grpcStatus}`);
+      expect(mockClient.close).toHaveBeenCalledOnce();
     } finally {
       await app.stop();
       vi.useRealTimers();

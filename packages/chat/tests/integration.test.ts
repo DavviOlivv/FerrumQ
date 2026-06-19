@@ -8,7 +8,12 @@ import path from "node:path";
 import { expect, test } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const brokerPath = path.join(repoRoot, "target/debug/brokerd");
+const brokerPath = path.join(
+  repoRoot,
+  "target",
+  "debug",
+  process.platform === "win32" ? "brokerd.exe" : "brokerd",
+);
 
 test("two chat clients send and receive messages in the same room", async (context) => {
   let process: ChildProcess | undefined;
@@ -17,7 +22,7 @@ test("two chat clients send and receive messages in the same room", async (conte
 
   try {
     if (!existsSync(brokerPath)) {
-      throw new Error("target/debug/brokerd is missing; build it first");
+      throw new Error(`${brokerPath} is missing; build it first`);
     }
 
     const [httpPort, grpcPort] = await reservePorts();

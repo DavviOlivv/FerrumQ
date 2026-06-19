@@ -58,6 +58,16 @@ function validateHttpUrl(value: string): string {
     throw configurationError("httpUrl must not include credentials");
   }
 
+  if (parsed.hostname === "") {
+    throw configurationError("httpUrl must include a host");
+  }
+
+  if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+    throw configurationError(
+      "httpUrl must not include a path, query, or fragment",
+    );
+  }
+
   return value;
 }
 

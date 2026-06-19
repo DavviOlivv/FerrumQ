@@ -1,3 +1,4 @@
+import { validateOptions } from "@ferrumq/sdk";
 import { render } from "ink";
 import { createElement, type ReactElement } from "react";
 import { type ChatEnvironment, parseChatArgs } from "./config.js";
@@ -78,6 +79,19 @@ export async function runChatCli(
   } catch (err) {
     output.writeError(
       `Invalid room name: ${errorMessage(err)}\n\n${buildUsageHelp()}`,
+    );
+    return 1;
+  }
+
+  try {
+    validateOptions({
+      httpUrl: raw.httpUrl,
+      grpcUrl: raw.grpcUrl,
+      timeoutMs: raw.timeoutMs,
+    });
+  } catch (err) {
+    output.writeError(
+      `Invalid broker configuration: ${errorMessage(err)}\n\n${buildUsageHelp()}`,
     );
     return 1;
   }

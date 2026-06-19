@@ -85,18 +85,24 @@ loopback permission failures are skipped; startup and correctness failures
 remain test failures.
 
 Milestone 13 chat tests include domain unit tests (room/name/text validation,
-message encoding/decoding, ANSI and control character sanitization,
-deduplication, identity generation, topic and consumer group naming),
-application unit tests with mocked SDK (startup/connect/disconnect/stop
-lifecycle, topic-already-exists handling, connection failure, no publish after
-stop, per-session unique consumer groups), terminal UI tests with
-`ink-testing-library` (initial render, header, empty state, prompts), and a
-real multi-client integration test. The integration test starts
-`brokerd serve-all` on ephemeral ports with a temporary data directory, creates
-two independent SDK clients in the same chat room, verifies bidirectional
-message delivery through independent consumer groups, ACKs deliveries, and
-confirms no redelivery after ACK. No fixed ports, arbitrary sleeps, or
-committed state.
+message encoding/decoding, fatal UTF-8, 32 KiB payload limit, canonical/future
+timestamps, ANSI/OSC/control/bidi sanitization, Unicode joiner preservation,
+fingerprinted LRU deduplication and conflicts, identity generation, topic and
+consumer group naming), application unit tests with mocked SDK
+(idle/starting/connected/failed/stopped lifecycle, duplicate start, publish
+gating, topic-already-exists handling, transient versus permanent gRPC errors,
+backoff recovery, malformed ACK, callback acceptance, and shutdown), and
+terminal UI tests with `ink-testing-library` (slow publish serialization,
+editing during publish, failure preservation, stale generation isolation,
+500-message memory and 200-message render bounds).
+
+The real chat integration suites start `brokerd serve-all` on ephemeral ports
+with temporary data directories. They cover two-way chat, three clients,
+identical display names, room isolation, simultaneous publish, concurrent topic
+creation, isolated client shutdown, and history replay from offset 0. No fixed
+ports, arbitrary sleeps, or committed state are used. Explicit loopback
+permission failures are skipped; startup and correctness failures remain test
+failures.
 
 ## CI Gates
 
@@ -127,3 +133,9 @@ The local and CI release gate is `make ci`, which runs:
 
 `cargo deny check` can emit a duplicate `hashbrown` warning. It is non-fatal
 only when the command exits successfully.
+
+The Windows-focused CI job separately validates frozen dependency installation,
+SDK/chat typecheck, SDK/chat tests, SDK/chat builds, automatic `brokerd.exe`
+preparation, and the built chat help entry point. This gate is intentionally
+narrower than the Linux `make ci` job and does not imply unrestricted Windows
+terminal support.

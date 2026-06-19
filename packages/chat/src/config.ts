@@ -39,136 +39,108 @@ export function parseChatArgs(
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] ?? "";
-
-    if (arg.startsWith("--")) {
-      const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
-      if (seen.has(flag)) {
+    const canonical =
+      arg === "-h" ? "--help" : arg === "-V" ? "--version" : undefined;
+    if (canonical !== undefined) {
+      if (seen.has(canonical)) {
         errors.push(`duplicate option: ${arg}`);
-        if (
-          !arg.includes("=") &&
-          i + 1 < args.length &&
-          !(args[i + 1] ?? "").startsWith("-")
-        ) {
-          i++;
-        }
-        continue;
+      } else {
+        seen.add(canonical);
+        if (canonical === "--help") wantHelp = true;
+        else wantVersion = true;
       }
-      seen.add(flag);
+      continue;
     }
 
-    switch (arg) {
-      case "--help":
-      case "-h":
-        wantHelp = true;
-        break;
-      case "--version":
-      case "-V":
-        wantVersion = true;
-        break;
-      case "--name": {
-        const raw = args[++i];
-        if (raw === undefined || raw.startsWith("-")) {
-          errors.push("--name requires a value");
-        } else {
-          name = raw;
-        }
-        break;
+    if (!arg.startsWith("--")) {
+      errors.push(`unknown option: ${arg}`);
+      continue;
+    }
+
+    const equalsIndex = arg.indexOf("=");
+    const flag = equalsIndex === -1 ? arg : arg.slice(0, equalsIndex);
+    const isValueFlag = VALUE_FLAGS.has(flag);
+
+    if (flag === "--help" || flag === "--version") {
+      if (equalsIndex !== -1) {
+        errors.push(`unknown option: ${arg}`);
+        continue;
       }
-      case "--room": {
-        const raw = args[++i];
-        if (raw === undefined || raw.startsWith("-")) {
-          errors.push("--room requires a value");
-        } else {
-          room = raw;
-        }
-        break;
+      if (seen.has(flag)) {
+        errors.push(`duplicate option: ${arg}`);
+      } else {
+        seen.add(flag);
+        if (flag === "--help") wantHelp = true;
+        else wantVersion = true;
       }
-      case "--http-url": {
-        const raw = args[++i];
-        if (raw === undefined || raw.startsWith("-")) {
-          errors.push("--http-url requires a value");
-        } else {
-          httpUrl = raw;
-        }
-        break;
+      continue;
+    }
+
+    if (!isValueFlag) {
+      errors.push(`unknown option: ${arg}`);
+      continue;
+    }
+
+    let raw: string | undefined;
+    if (equalsIndex === -1) {
+      const candidate = args[i + 1];
+      if (candidate !== undefined && !candidate.startsWith("-")) {
+        raw = candidate;
+        i++;
       }
-      case "--grpc-url": {
-        const raw = args[++i];
-        if (raw === undefined || raw.startsWith("-")) {
-          errors.push("--grpc-url requires a value");
-        } else {
-          grpcUrl = raw;
-        }
-        break;
+    } else {
+      raw = arg.slice(equalsIndex + 1);
+      if (raw.startsWith("=")) {
+        errors.push(`invalid option syntax: ${arg}`);
+        continue;
       }
-      case "--timeout-ms": {
-        const raw = args[++i];
-        if (raw === undefined || raw.startsWith("-")) {
-          errors.push("--timeout-ms requires a value");
-        } else {
-          const parsed = parseUnsignedInteger(raw);
-          if (parsed === null || parsed > MAX_SAFE_TIMER_MS) {
-            errors.push("--timeout-ms must be a non-negative integer");
-          } else {
-            timeoutMs = parsed;
-          }
-        }
-        break;
+    }
+
+    if (seen.has(flag)) {
+      errors.push(`duplicate option: ${arg}`);
+      continue;
+    }
+    seen.add(flag);
+
+    if (raw === undefined || raw.length === 0) {
+      errors.push(`${flag} requires a value`);
+      continue;
+    }
+
+    if (flag === "--name") {
+      name = raw;
+    } else if (flag === "--room") {
+      room = raw;
+    } else if (flag === "--http-url") {
+      httpUrl = raw;
+    } else if (flag === "--grpc-url") {
+      grpcUrl = raw;
+    } else if (flag === "--timeout-ms") {
+      const parsed = parseUnsignedInteger(raw);
+      if (parsed === null || parsed > MAX_SAFE_TIMER_MS) {
+        errors.push("--timeout-ms must be a non-negative integer");
+      } else {
+        timeoutMs = parsed;
       }
-      case "--poll-interval-ms": {
-        const raw = args[++i];
-        if (raw === undefined || raw.startsWith("-")) {
-          errors.push("--poll-interval-ms requires a value");
-        } else {
-          const parsed = parseUnsignedInteger(raw);
-          if (parsed === null || parsed <= 0 || parsed > MAX_SAFE_TIMER_MS) {
-            errors.push("--poll-interval-ms must be a positive integer");
-          } else {
-            pollIntervalMs = parsed;
-          }
-        }
-        break;
-      }
-      default: {
-        if (arg.startsWith("--name=")) {
-          const raw = arg.slice("--name=".length);
-          name = raw.startsWith("=") ? raw.slice(1) : raw;
-        } else if (arg.startsWith("--room=")) {
-          const raw = arg.slice("--room=".length);
-          room = raw.startsWith("=") ? raw.slice(1) : raw;
-        } else if (arg.startsWith("--http-url=")) {
-          const raw = arg.slice("--http-url=".length);
-          httpUrl = raw.startsWith("=") ? raw.slice(1) : raw;
-        } else if (arg.startsWith("--grpc-url=")) {
-          const raw = arg.slice("--grpc-url=".length);
-          grpcUrl = raw.startsWith("=") ? raw.slice(1) : raw;
-        } else if (arg.startsWith("--timeout-ms=")) {
-          const parsed = parseUnsignedInteger(
-            arg.slice("--timeout-ms=".length),
-          );
-          if (parsed === null || parsed > MAX_SAFE_TIMER_MS) {
-            errors.push("--timeout-ms must be a non-negative integer");
-          } else {
-            timeoutMs = parsed;
-          }
-        } else if (arg.startsWith("--poll-interval-ms=")) {
-          const parsed = parseUnsignedInteger(
-            arg.slice("--poll-interval-ms=".length),
-          );
-          if (parsed === null || parsed <= 0 || parsed > MAX_SAFE_TIMER_MS) {
-            errors.push("--poll-interval-ms must be a positive integer");
-          } else {
-            pollIntervalMs = parsed;
-          }
-        } else {
-          errors.push(`unknown option: ${arg}`);
-        }
+    } else {
+      const parsed = parseUnsignedInteger(raw);
+      if (parsed === null || parsed <= 0 || parsed > MAX_SAFE_TIMER_MS) {
+        errors.push("--poll-interval-ms must be a positive integer");
+      } else {
+        pollIntervalMs = parsed;
       }
     }
   }
 
   if (wantHelp && wantVersion) {
     return { error: "--help and --version cannot be combined", exitCode: 1 };
+  }
+
+  if (errors.length > 0) {
+    return {
+      error: `${errors.join("\n")}\n\n${buildHelp()}`,
+      exitCode: 1,
+    };
   }
 
   if (wantHelp) {
@@ -205,6 +177,15 @@ export function parseChatArgs(
     },
   };
 }
+
+const VALUE_FLAGS = new Set([
+  "--name",
+  "--room",
+  "--http-url",
+  "--grpc-url",
+  "--timeout-ms",
+  "--poll-interval-ms",
+]);
 
 function parseUnsignedInteger(raw: string): number | null {
   if (!/^[0-9]+$/.test(raw)) {

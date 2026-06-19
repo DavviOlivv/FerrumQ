@@ -41,3 +41,46 @@ jobs:
 
       - name: Local harness
         run: make ci
+
+  windows-chat-sdk:
+    name: Windows SDK and chat
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck SDK and chat
+        run: |
+          pnpm --filter @ferrumq/sdk typecheck
+          pnpm --filter @ferrumq/chat typecheck
+
+      - name: Test SDK and chat
+        run: |
+          pnpm --filter @ferrumq/sdk test
+          pnpm --filter @ferrumq/chat test
+
+      - name: Build SDK and chat
+        run: |
+          pnpm --filter @ferrumq/sdk build
+          pnpm --filter @ferrumq/chat build
+
+      - name: Chat help smoke
+        run: node packages/chat/dist/cli.js --help

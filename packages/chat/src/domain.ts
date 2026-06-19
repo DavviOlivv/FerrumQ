@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export const CHAT_MESSAGE_VERSION = 1;
 export const CHAT_MESSAGE_TYPE = "ferrumq.chat.message.v1";
@@ -8,6 +8,8 @@ export const MAX_NAME_LENGTH = 32;
 export const MAX_MESSAGE_LENGTH = 4096;
 export const MAX_IDENTIFIER_LENGTH = 128;
 export const MAX_TIMESTAMP_LENGTH = 128;
+export const MAX_CHAT_PAYLOAD_BYTES = 32 * 1024;
+export const MAX_FUTURE_TIMESTAMP_MS = 5 * 60 * 1000;
 
 export const ROOM_PATTERN = /^[a-z0-9._-]+$/;
 export const NAME_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,30}[a-zA-Z0-9])?$/;
@@ -123,13 +125,15 @@ export function validateText(raw: string): string {
 }
 
 export function sanitizeControlChars(value: string): string {
-  return (
-    value
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional C0/C1 sanitization regex
-      .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
-      .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
-      .replace(/[\u200b-\u200d\ufeff]/g, "")
-  );
+  const cleaned = value
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional C0/C1 sanitization regex
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+    .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\u200b\u2060\ufeff]/g, "");
+
+  return cleaned.replace(/[\u200c\u200d]/g, "").trim().length === 0
+    ? cleaned.replace(/[\u200c\u200d]/g, "")
+    : cleaned;
 }
 
 export function stripAnsiEscapeSequences(value: string): string {
@@ -138,7 +142,9 @@ export function stripAnsiEscapeSequences(value: string): string {
       // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI CSI sanitization
       .replace(/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g, "")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI OSC sanitization
-      .replace(/\u001b\].*?(?:\u0007|\u001b\\|\u009c)/g, "")
+      .replace(/(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c|$)/g, "")
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional two-byte ANSI escape sanitization
+      .replace(/\u001b[ -/][@-~]/g, "")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI escape sanitization
       .replace(/\u001b/g, "")
   );
@@ -173,6 +179,7 @@ export function buildChatMessage(
 
 export function parseChatMessage(
   raw: string,
+  now: Date = new Date(),
 ): ChatMessageV1 | MalformedMessage {
   let parsed: unknown;
   try {
@@ -181,7 +188,7 @@ export function parseChatMessage(
     return { kind: "invalid-json" };
   }
 
-  if (parsed === null || typeof parsed !== "object") {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { kind: "not-object" };
   }
 
@@ -199,7 +206,11 @@ export function parseChatMessage(
     return { kind: "missing-room" };
   }
 
-  if (obj.sender === null || typeof obj.sender !== "object") {
+  if (
+    obj.sender === null ||
+    typeof obj.sender !== "object" ||
+    Array.isArray(obj.sender)
+  ) {
     return { kind: "missing-sender" };
   }
 
@@ -244,13 +255,13 @@ export function parseChatMessage(
     return { kind: "invalid-sent-at" };
   }
 
-  const sanitizedId = sanitizeDisplay(obj.id);
+  const sanitizedId = sanitizeDisplay(obj.id).trim();
   const sanitizedRoom = sanitizeDisplay(obj.room);
-  const sanitizedSenderId = sanitizeDisplay(sender.id as string);
+  const sanitizedSenderId = sanitizeDisplay(sender.id as string).trim();
   const sanitizedSenderName = sanitizeDisplay(sender.name as string);
-  const sanitizedSessionId = sanitizeDisplay(sender.sessionId as string);
+  const sanitizedSessionId = sanitizeDisplay(sender.sessionId as string).trim();
   const sanitizedText = sanitizeDisplay(obj.text);
-  const sanitizedSentAt = sanitizeDisplay(obj.sentAt);
+  const sanitizedSentAt = sanitizeDisplay(obj.sentAt).trim();
 
   if (sanitizedId.length === 0) {
     return { kind: "invalid-id" };
@@ -268,6 +279,11 @@ export function parseChatMessage(
     return { kind: "invalid-sender-session-id" };
   }
   if (sanitizedSentAt.length === 0) {
+    return { kind: "invalid-sent-at" };
+  }
+
+  const sentAt = parseCanonicalTimestamp(sanitizedSentAt, now);
+  if (sentAt === null) {
     return { kind: "invalid-sent-at" };
   }
 
@@ -302,8 +318,30 @@ export function parseChatMessage(
       sessionId: sanitizedSessionId,
     },
     text: validatedText,
-    sentAt: sanitizedSentAt,
+    sentAt,
   };
+}
+
+export function parseChatPayload(
+  payload: Uint8Array,
+  now: Date = new Date(),
+): ChatMessageV1 | MalformedMessage {
+  if (payload.byteLength > MAX_CHAT_PAYLOAD_BYTES) {
+    return { kind: "payload-too-large" };
+  }
+
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(payload);
+  } catch {
+    return { kind: "invalid-utf8" };
+  }
+
+  return parseChatMessage(raw, now);
+}
+
+export function fingerprintChatMessage(message: ChatMessageV1): string {
+  return createHash("sha256").update(JSON.stringify(message)).digest("hex");
 }
 
 export function toDisplayMessage(
@@ -328,6 +366,19 @@ function parseTimestamp(iso: string): Date {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
+function parseCanonicalTimestamp(value: string, now: Date): string | null {
+  const parsed = new Date(value);
+  const timestampMs = parsed.getTime();
+  if (
+    Number.isNaN(timestampMs) ||
+    parsed.toISOString() !== value ||
+    timestampMs > now.getTime() + MAX_FUTURE_TIMESTAMP_MS
+  ) {
+    return null;
+  }
+  return value;
+}
+
 export type MalformedMessage =
   | { kind: "invalid-json" }
   | { kind: "not-object" }
@@ -347,6 +398,8 @@ export type MalformedMessage =
   | { kind: "invalid-text" }
   | { kind: "missing-sent-at" }
   | { kind: "invalid-sent-at" }
+  | { kind: "payload-too-large" }
+  | { kind: "invalid-utf8" }
   | { kind: "room-mismatch" }
   | { kind: "parse-error" };
 
@@ -355,32 +408,47 @@ export class DomainError extends Error {
 }
 
 export class DeduplicationCache {
-  private readonly map = new Map<string, number>();
+  private readonly map = new Map<string, string | null>();
   private readonly maxSize: number;
 
   constructor(maxSize = 2048) {
+    if (!Number.isInteger(maxSize) || maxSize <= 0) {
+      throw new RangeError("deduplication cache capacity must be positive");
+    }
     this.maxSize = maxSize;
   }
 
   has(id: string): boolean {
-    const seenAt = this.map.get(id);
-    if (seenAt === undefined) {
+    if (!this.map.has(id)) {
       return false;
     }
 
+    const fingerprint = this.map.get(id) ?? null;
     this.map.delete(id);
-    this.map.set(id, seenAt);
+    this.map.set(id, fingerprint);
     return true;
   }
 
-  add(id: string): void {
+  observe(id: string, fingerprint: string): DeduplicationResult {
+    if (!this.map.has(id)) {
+      return "new";
+    }
+
+    const existing = this.map.get(id) ?? null;
+    this.map.delete(id);
+    this.map.set(id, existing);
+    return existing === fingerprint ? "duplicate" : "conflict";
+  }
+
+  add(id: string, fingerprint: string | null = null): void {
+    this.map.delete(id);
     if (this.map.size >= this.maxSize) {
       const first = this.map.keys().next();
       if (!first.done && first.value !== undefined) {
         this.map.delete(first.value);
       }
     }
-    this.map.set(id, Date.now());
+    this.map.set(id, fingerprint);
   }
 
   clear(): void {
@@ -391,3 +459,5 @@ export class DeduplicationCache {
     return this.map.size;
   }
 }
+
+export type DeduplicationResult = "new" | "duplicate" | "conflict";

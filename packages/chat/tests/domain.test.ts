@@ -6,6 +6,7 @@ import {
   generateMessageId,
   generateParticipantId,
   generateSessionId,
+  MAX_CHAT_PAYLOAD_BYTES,
   MAX_IDENTIFIER_LENGTH,
   MAX_MESSAGE_LENGTH,
   MAX_NAME_LENGTH,
@@ -15,6 +16,7 @@ import {
   makeConsumerId,
   makeTopicName,
   parseChatMessage,
+  parseChatPayload,
   sanitizeControlChars,
   sanitizeDisplay,
   stripAnsiEscapeSequences,
@@ -193,10 +195,16 @@ describe("sanitizeDisplay", () => {
     expect(result).toBe("HelloWorld");
   });
 
-  it("strips zero-width characters but preserves visible text", () => {
+  it("strips zero-width space while preserving joiners next to visible text", () => {
     const input = "\u200bH\u200ci\u200d";
     const result = sanitizeDisplay(input);
-    expect(result).toBe("Hi");
+    expect(result).toBe("H\u200ci\u200d");
+    expect(sanitizeDisplay("\u200c\u200d")).toBe("");
+    expect(sanitizeDisplay("👩‍💻")).toBe("👩‍💻");
+  });
+
+  it("strips BOM, word joiner, Arabic letter mark, and bidi isolates", () => {
+    expect(sanitizeDisplay("\ufeffA\u2060B\u061cC\u2066D\u2069")).toBe("ABCD");
   });
 });
 
@@ -345,6 +353,15 @@ describe("parseChatMessage", () => {
     expect("kind" in result && result.kind === "not-object").toBe(true);
   });
 
+  it.each([
+    "[]",
+    '"text"',
+    "42",
+    "true",
+  ])("rejects non-object payload %s", (raw) => {
+    expect(parseChatMessage(raw)).toEqual({ kind: "not-object" });
+  });
+
   it("rejects missing sender", () => {
     const result = parseChatMessage(
       JSON.stringify({
@@ -378,7 +395,7 @@ describe("parseChatMessage", () => {
         room: "g",
         sender: { id: "x", name: "x", sessionId: "x" },
         text: "t",
-        sentAt: "now",
+        sentAt: "2025-01-01T00:00:00.000Z",
       }),
     );
     expect("kind" in result && result.kind === "missing-id").toBe(true);
@@ -396,7 +413,7 @@ describe("parseChatMessage", () => {
         room: "g",
         sender: { id: "x", name: "x", sessionId: "x" },
         text: "t",
-        sentAt: "now",
+        sentAt: "2025-01-01T00:00:00.000Z",
       }),
     );
     expect(result).toEqual({ kind: "invalid-id" });
@@ -410,7 +427,7 @@ describe("parseChatMessage", () => {
         room: "g",
         sender: { id: "x", name: "x", sessionId: "x" },
         text: "t",
-        sentAt: "now",
+        sentAt: "2025-01-01T00:00:00.000Z",
       }),
     );
     expect("kind" in result).toBe(false);
@@ -539,11 +556,54 @@ describe("parseChatMessage", () => {
       message.text = "  olá 🎉  ";
       message.sentAt = "not-an-iso-timestamp";
     });
-    expect("kind" in result).toBe(false);
-    if (!("kind" in result)) {
-      expect(result.text).toBe("olá 🎉");
-      expect(result.sentAt).toBe("not-an-iso-timestamp");
-    }
+    expect(result).toEqual({ kind: "invalid-sent-at" });
+  });
+
+  it("requires a canonical timestamp no more than five minutes ahead", () => {
+    const now = new Date("2025-01-01T00:00:00.000Z");
+    const parseTimestamp = (sentAt: string) => {
+      const message = structuredClone(validMessage);
+      message.sentAt = sentAt;
+      return parseChatMessage(JSON.stringify(message), now);
+    };
+
+    expect(parseTimestamp("2025-01-01T00:05:00.000Z")).toMatchObject({
+      sentAt: "2025-01-01T00:05:00.000Z",
+    });
+    expect(parseTimestamp("2025-01-01T00:05:00Z")).toEqual({
+      kind: "invalid-sent-at",
+    });
+    expect(parseTimestamp("2025-01-01T01:00:00.000+01:00")).toEqual({
+      kind: "invalid-sent-at",
+    });
+    expect(parseTimestamp("2025-01-01T00:05:00.001Z")).toEqual({
+      kind: "invalid-sent-at",
+    });
+  });
+
+  it.each([
+    ["id", 1, "missing-id"],
+    ["room", true, "missing-room"],
+    ["text", {}, "missing-text"],
+    ["sentAt", 1, "missing-sent-at"],
+  ] as const)("rejects wrong %s types", (field, value, kind) => {
+    const message = structuredClone(validMessage) as Record<string, unknown>;
+    message[field] = value;
+    expect(parseChatMessage(JSON.stringify(message))).toEqual({ kind });
+  });
+});
+
+describe("parseChatPayload", () => {
+  it("rejects invalid UTF-8 before JSON parsing", () => {
+    expect(parseChatPayload(new Uint8Array([0xc3, 0x28]))).toEqual({
+      kind: "invalid-utf8",
+    });
+  });
+
+  it("rejects payloads larger than 32 KiB before decoding", () => {
+    expect(
+      parseChatPayload(new Uint8Array(MAX_CHAT_PAYLOAD_BYTES + 1)),
+    ).toEqual({ kind: "payload-too-large" });
   });
 });
 
@@ -581,6 +641,12 @@ describe("toDisplayMessage", () => {
 });
 
 describe("DeduplicationCache", () => {
+  it("requires a positive integer capacity", () => {
+    expect(() => new DeduplicationCache(0)).toThrow(RangeError);
+    expect(() => new DeduplicationCache(-1)).toThrow(RangeError);
+    expect(() => new DeduplicationCache(1.5)).toThrow(RangeError);
+  });
+
   it("tracks seen IDs", () => {
     const cache = new DeduplicationCache(100);
     expect(cache.has("msg-1")).toBe(false);
@@ -623,6 +689,25 @@ describe("DeduplicationCache", () => {
     expect(cache.has("msg-1")).toBe(false);
     expect(cache.has("msg-2")).toBe(false);
     expect(cache.size).toBe(0);
+  });
+
+  it("distinguishes duplicate content from conflicting content", () => {
+    const cache = new DeduplicationCache(2);
+    expect(cache.observe("msg-1", "sha-a")).toBe("new");
+    cache.add("msg-1", "sha-a");
+    expect(cache.observe("msg-1", "sha-a")).toBe("duplicate");
+    expect(cache.observe("msg-1", "sha-b")).toBe("conflict");
+  });
+
+  it("keeps a strict capacity when refreshing an existing entry", () => {
+    const cache = new DeduplicationCache(2);
+    cache.add("a", "sha-a");
+    cache.add("b", "sha-b");
+    cache.add("a", "sha-a2");
+
+    expect(cache.size).toBe(2);
+    expect(cache.observe("b", "sha-b")).toBe("duplicate");
+    expect(cache.observe("a", "sha-a2")).toBe("duplicate");
   });
 });
 

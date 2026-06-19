@@ -31,6 +31,21 @@ interface ChatAppGeneration {
   stopPromise: Promise<void> | null;
 }
 
+interface PendingSubmission {
+  generation: ChatAppGeneration;
+  snapshot: string;
+}
+
+export const MAX_MESSAGE_HISTORY = 500;
+export const MAX_RENDERED_MESSAGES = 200;
+
+export function appendMessageHistory(
+  previous: DisplayMessage[],
+  message: DisplayMessage,
+): DisplayMessage[] {
+  return [...previous.slice(-(MAX_MESSAGE_HISTORY - 1)), message];
+}
+
 export function ChatUi({
   config,
   onExit,
@@ -43,8 +58,11 @@ export function ChatUi({
   const [state, setState] = useState<ChatState>({ status: "disconnected" });
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
   const mounted = useRef(true);
+  const inputRef = useRef("");
   const activeGeneration = useRef<ChatAppGeneration | null>(null);
+  const pendingSubmission = useRef<PendingSubmission | null>(null);
   const generations = useRef(new Set<ChatAppGeneration>());
   const latestStopPromise = useRef<Promise<void>>(Promise.resolve());
   const shutdownRequested = useRef(false);
@@ -80,6 +98,7 @@ export function ChatUi({
     return () => {
       mounted.current = false;
       shutdownRequested.current = true;
+      pendingSubmission.current = null;
     };
   }, []);
 
@@ -89,10 +108,13 @@ export function ChatUi({
     }
 
     setMessages([]);
+    inputRef.current = "";
     setInput("");
     setState({ status: "disconnected" });
     setError(null);
     setWarning(null);
+    setSending(false);
+    pendingSubmission.current = null;
 
     const previousStop = latestStopPromise.current;
     let generation: ChatAppGeneration;
@@ -104,7 +126,7 @@ export function ChatUi({
     const deps: ChatAppDeps = {
       onMessage: (msg: DisplayMessage) => {
         if (isCurrent()) {
-          setMessages((prev) => [...prev.slice(-499), msg]);
+          setMessages((prev) => appendMessageHistory(prev, msg));
         }
       },
       onStateChange: (s: ChatState) => {
@@ -172,23 +194,56 @@ export function ChatUi({
   }, [name, room, httpUrl, grpcUrl, timeoutMs, pollIntervalMs, stopGeneration]);
 
   const handleSubmit = useCallback(() => {
-    const trimmed = input.trim();
+    if (pendingSubmission.current !== null) {
+      return;
+    }
+
+    const snapshot = inputRef.current;
+    const trimmed = snapshot.trim();
     if (trimmed.length === 0) {
       return;
     }
-    const app = activeGeneration.current?.app;
-    if (app === undefined) {
+    const generation = activeGeneration.current;
+    if (generation === null || !generation.active) {
       return;
     }
-    app
+
+    const submission: PendingSubmission = { generation, snapshot };
+    pendingSubmission.current = submission;
+    setSending(true);
+
+    generation.app
       .sendMessage(trimmed)
       .then((ok) => {
-        if (ok) {
-          setInput("");
+        if (
+          ok &&
+          mounted.current &&
+          generation.active &&
+          activeGeneration.current === generation &&
+          pendingSubmission.current === submission
+        ) {
+          const current = inputRef.current;
+          const next = current.startsWith(snapshot)
+            ? current.slice(snapshot.length)
+            : current;
+          inputRef.current = next;
+          setInput(next);
         }
       })
-      .catch(() => {});
-  }, [input]);
+      .catch(() => {})
+      .finally(() => {
+        if (pendingSubmission.current === submission) {
+          pendingSubmission.current = null;
+          if (
+            mounted.current &&
+            generation.active &&
+            activeGeneration.current === generation
+          ) {
+            setSending(false);
+          }
+        }
+      });
+  }, []);
 
   const handleQuit = useCallback(() => {
     onExit?.();
@@ -208,12 +263,16 @@ export function ChatUi({
     }
 
     if (key.backspace || key.delete) {
-      setInput((prev) => prev.slice(0, -1));
+      const next = inputRef.current.slice(0, -1);
+      inputRef.current = next;
+      setInput(next);
       return;
     }
 
     if (rawInput.length > 0 && !key.ctrl && !key.meta) {
-      setInput((prev) => prev + rawInput);
+      const next = inputRef.current + rawInput;
+      inputRef.current = next;
+      setInput(next);
     }
   });
 
@@ -245,7 +304,7 @@ export function ChatUi({
           </Box>
         )}
 
-        {messages.slice(-200).map((msg) => (
+        {messages.slice(-MAX_RENDERED_MESSAGES).map((msg) => (
           <Box key={msg.id} flexDirection="row">
             <Text dimColor>{formatTime(msg.timestamp)} </Text>
             {msg.isSelf ? (
@@ -278,6 +337,7 @@ export function ChatUi({
         <Text dimColor>{">"} </Text>
         <Text>{input}</Text>
         <Text dimColor>|</Text>
+        {sending && <Text dimColor> sending…</Text>}
       </Box>
 
       <Box>

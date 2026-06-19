@@ -8,7 +8,12 @@ import path from "node:path";
 import { expect, test } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const brokerPath = path.join(repoRoot, "target/debug/brokerd");
+const brokerPath = path.join(
+  repoRoot,
+  "target",
+  "debug",
+  process.platform === "win32" ? "brokerd.exe" : "brokerd",
+);
 
 interface BrokerFixture {
   httpUrl: string;
@@ -22,7 +27,7 @@ async function startBroker(_context: {
   skip: () => void;
 }): Promise<BrokerFixture> {
   if (!existsSync(brokerPath)) {
-    throw new Error("target/debug/brokerd is missing; build it first");
+    throw new Error(`${brokerPath} is missing; build it first`);
   }
 
   const dataDir = mkdtempSync(path.join(tmpdir(), "ferrumq-chat-multi-"));
@@ -445,6 +450,99 @@ test("topic creation race with two concurrent clients", async (context) => {
     }
     throw new Error(
       `Topic race failed: ${errorMessage(error)}\n${fixture?.output() ?? ""}`,
+      { cause: error },
+    );
+  } finally {
+    if (fixture) {
+      await stopBroker(fixture);
+    }
+  }
+});
+
+test("simultaneous publishes are visible to an independent session", async (context) => {
+  let fixture: BrokerFixture | undefined;
+  try {
+    fixture = await startBroker(context);
+    const FerrumQClient = await importClient();
+
+    const room = `room-${randomUUID().slice(0, 8)}`;
+    const topic = `chat.${room}`;
+    const first = new FerrumQClient({
+      httpUrl: fixture.httpUrl,
+      grpcUrl: fixture.grpcUrl,
+      timeoutMs: 5_000,
+    });
+    const second = new FerrumQClient({
+      httpUrl: fixture.httpUrl,
+      grpcUrl: fixture.grpcUrl,
+      timeoutMs: 5_000,
+    });
+    const observer = new FerrumQClient({
+      httpUrl: fixture.httpUrl,
+      grpcUrl: fixture.grpcUrl,
+      timeoutMs: 5_000,
+    });
+
+    try {
+      await first.createTopic({ name: topic, partitions: 1 });
+      await Promise.all([
+        first.publish({
+          topic,
+          payload: chatPayload(
+            room,
+            "first",
+            "First",
+            "first-session",
+            "simultaneous-first",
+          ),
+          type: "ferrumq.chat.message.v1",
+          source: "ferrumq-chat",
+        }),
+        second.publish({
+          topic,
+          payload: chatPayload(
+            room,
+            "second",
+            "Second",
+            "second-session",
+            "simultaneous-second",
+          ),
+          type: "ferrumq.chat.message.v1",
+          source: "ferrumq-chat",
+        }),
+      ]);
+
+      const group = `chat.${room}.session.observer-${randomUUID().slice(0, 8)}`;
+      const deliveries = await observer.consume({
+        topic,
+        group,
+        consumerId: `consumer-${group}`,
+        maxMessages: 5,
+        leaseMs: 30_000,
+      });
+      const texts = deliveries.map((delivery) =>
+        decoder.decode(delivery.payload),
+      );
+
+      expect(deliveries).toHaveLength(2);
+      expect(texts.some((text) => text.includes("simultaneous-first"))).toBe(
+        true,
+      );
+      expect(texts.some((text) => text.includes("simultaneous-second"))).toBe(
+        true,
+      );
+    } finally {
+      first.close();
+      second.close();
+      observer.close();
+    }
+  } catch (error) {
+    if (isLoopbackPermissionError(error, fixture?.output() ?? "")) {
+      context.skip();
+      return;
+    }
+    throw new Error(
+      `Simultaneous publish failed: ${errorMessage(error)}\n${fixture?.output() ?? ""}`,
       { cause: error },
     );
   } finally {

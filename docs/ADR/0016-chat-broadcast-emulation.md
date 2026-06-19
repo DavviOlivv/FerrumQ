@@ -36,8 +36,8 @@ This means:
 
 The chat application handles:
 
-- Session-local deduplication via an in-memory LRU cache keyed by
-  application message ID.
+- Session-local deduplication via an in-memory LRU cache keyed by application
+  message ID with a SHA-256 content fingerprint.
 - ACK after a message is accepted for display, advancing the per-group cursor.
 - ACK for malformed messages to prevent redelivery loops.
 
@@ -58,14 +58,21 @@ The chat application handles:
 - A new participant joining a room with existing messages will see the full
   topic history from offset 0, because their consumer group starts fresh.
   This is visible to the user and documented honestly.
+- Replay is bounded to five messages per unary consume. Without transport
+  latency, replay duration is approximately
+  `ceil(history / 5) × pollIntervalMs`.
 - No `--history` or `--from` flag has been implemented to control history
   visibility on join.
 - The number of consumer groups scales linearly with the number of unique
   chat sessions. For a local demo this is negligible; for a production
   deployment it would require broker-side consumer-group lifecycle management.
+- Session groups are persistent and currently have no deletion, retention, or
+  cleanup mechanism, so repeated chat launches grow broker state.
 - Session-local deduplication is not exactly-once delivery. Duplicates
   delivered across broker restarts or after cache eviction will be displayed
   again.
+- Reuse of one application message ID with different accepted content is
+  treated as a conflict, warned, suppressed, and ACKed.
 
 ### Mitigations
 
