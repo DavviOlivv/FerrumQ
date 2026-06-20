@@ -547,7 +547,7 @@ export function createGrpcDataPlaneClient(
         partition: numberField(response, "partition"),
         offset: decimalStringField(response, "offset"),
         messageId: stringField(response, "messageId"),
-        deduplicated: booleanField(response, "deduplicated"),
+        deduplicated: booleanField(response, "deduplicated", false),
       };
     },
 
@@ -823,10 +823,17 @@ function numberField(value: Record<string, unknown>, field: string): number {
   throw new Error(`gRPC response field ${field} was not an integer`);
 }
 
-function booleanField(value: Record<string, unknown>, field: string): boolean {
+function booleanField(
+  value: Record<string, unknown>,
+  field: string,
+  defaultValue?: boolean,
+): boolean {
   const fieldValue = value[field];
   if (typeof fieldValue === "boolean") {
     return fieldValue;
+  }
+  if (fieldValue === undefined && defaultValue !== undefined) {
+    return defaultValue;
   }
   throw new Error(`gRPC response field ${field} was not a boolean`);
 }

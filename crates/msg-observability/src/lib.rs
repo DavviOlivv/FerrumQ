@@ -797,6 +797,20 @@ pub mod metrics {
         }
 
         #[test]
+        fn idempotency_counters_are_label_free() {
+            let _guard = test_guard();
+            reset_for_tests();
+            record_broker_publish_deduplicated();
+            record_broker_publish_idempotency_conflict();
+
+            let output = render_prometheus();
+            assert!(output.contains("ferrumq_broker_publish_deduplicated_total 1"));
+            assert!(output.contains("ferrumq_broker_publish_idempotency_conflicts_total 1"));
+            assert!(!output.contains("ferrumq_broker_publish_deduplicated_total{"));
+            assert!(!output.contains("ferrumq_broker_publish_idempotency_conflicts_total{"));
+        }
+
+        #[test]
         fn metrics_do_not_render_private_payload_or_identifier_strings() {
             let _guard = test_guard();
             reset_for_tests();

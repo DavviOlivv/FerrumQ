@@ -615,6 +615,7 @@ dependencies = [
  "msg-core",
  "msg-observability",
  "msg-storage",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",

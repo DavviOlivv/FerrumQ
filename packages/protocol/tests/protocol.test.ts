@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -446,6 +446,62 @@ describe("gRPC status formatting", () => {
 describe("gRPC client helpers", () => {
   it("resolves the packaged or source-tree proto", () => {
     expect(existsSync(defaultDataPlaneProtoPath())).toBe(true);
+  });
+
+  it("keeps publish response field numbers and packaged proto declarations compatible", () => {
+    const sourcePath = path.resolve(
+      process.cwd(),
+      "../../crates/msg-protocol/proto/ferrumq/dataplane/v1/dataplane.proto",
+    );
+    const source = readFileSync(sourcePath, "utf8");
+    expect(source).toContain("package ferrumq.dataplane.v1;");
+    expect(source).toMatch(/string topic = 1;/);
+    expect(source).toMatch(/uint32 partition = 2;/);
+    expect(source).toMatch(/uint64 offset = 3;/);
+    expect(source).toMatch(/string message_id = 4;/);
+    expect(source).toMatch(/bool deduplicated = 5;/);
+
+    const packagedPath = path.resolve(
+      process.cwd(),
+      "dist/proto/ferrumq/dataplane/v1/dataplane.proto",
+    );
+    if (existsSync(packagedPath)) {
+      expect(readFileSync(packagedPath, "utf8")).toBe(source);
+    }
+  });
+
+  it("defaults an absent deduplicated response field to false", async () => {
+    const client = createGrpcDataPlaneClient("http://broker.local:19090", {
+      protoPath: "/tmp/dataplane.proto",
+      createRawClient() {
+        return {
+          publish(
+            _request: unknown,
+            _options: unknown,
+            callback: (error: null, response: unknown) => void,
+          ) {
+            callback(null, {
+              topic: "orders",
+              partition: 0,
+              offset: "0",
+              messageId: "message-1",
+            });
+          },
+        };
+      },
+    });
+
+    await expect(
+      client.publish({
+        topic: "orders",
+        messageId: "message-1",
+        payload: Buffer.from("hello"),
+        contentType: "text/plain",
+        type: "example",
+        source: "test",
+        timeUnixMs: "1",
+      }),
+    ).resolves.toMatchObject({ deduplicated: false });
   });
 
   it("passes deadlines, cancels active calls, and ignores late callbacks", async () => {

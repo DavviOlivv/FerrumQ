@@ -161,16 +161,23 @@ live-reload each other's mutations or share in-memory state. In this mode, an
 already-running HTTP process or TUI will not show live gRPC-process changes.
 `/metrics` is also process-local; HTTP `/metrics` does not expose counters from
 a separate gRPC process. `serve-all` solves local live state and metrics
-coherence only inside one process. Cross-process live reload, distributed
-locking, and metrics aggregation remain deferred.
+coherence only inside one process. There is no cross-process mutation lock, so
+split processes must not be treated as a coordinated way to concurrently write
+one data directory. Cross-process live reload, distributed locking, and metrics
+aggregation remain deferred.
 
 ## Safety Notes
 
 FerrumQ currently provides local durable at-least-once delivery only. Consumers
-must be idempotent. `idempotency_key` is metadata-only and is not enforced for
-producer deduplication. Exactly-once delivery, clustering, replication,
-auth/RBAC, TLS, MaaS/multi-tenancy, dashboards, and production daemon hardening
-are outside the current release scope.
+must be idempotent. A non-empty `idempotency_key` enables producer-side
+deduplication scoped by topic for the lifetime of retained local data;
+equivalent retries return the original publish identity and conflicting reuse
+is rejected. This is not exactly-once delivery, and clients do not retry
+automatically. Recovery scans retained message logs to rebuild a process-local
+in-memory idempotency index, so startup work and index memory grow with retained
+data. Cross-process coordination, clustering, replication, auth/RBAC, TLS,
+MaaS/multi-tenancy, dashboards, and production daemon hardening are outside the
+current release scope.
 
 Message payloads are not logged by default and are not exported as metric
 labels.

@@ -98,6 +98,7 @@ const DEFAULT_MAX_MESSAGES = 1;
 const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_PUBLISH_TYPE = "ferrumq.sdk.message";
 const DEFAULT_PUBLISH_SOURCE = "ferrumq-sdk";
+const IDEMPOTENCY_CONFLICT_DETAIL = "idempotency key conflict";
 
 export class FerrumQClient {
   private readonly httpUrl: string;
@@ -521,7 +522,9 @@ export class FerrumQClient {
     // grpcStatus, but the public code is IDEMPOTENCY_KEY_CONFLICT so callers
     // can detect conflicts consistently across SDK and CLI.
     const conflictCode =
-      grpcStatus === "ALREADY_EXISTS" && operation === "publish"
+      grpcStatus === "ALREADY_EXISTS" &&
+      operation === "publish" &&
+      candidate.details === IDEMPOTENCY_CONFLICT_DETAIL
         ? "IDEMPOTENCY_KEY_CONFLICT"
         : grpcStatus;
 

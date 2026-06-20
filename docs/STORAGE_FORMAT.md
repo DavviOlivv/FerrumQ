@@ -87,7 +87,16 @@ Milestone 4 broker-state events are written as compact JSON objects followed by 
 - `message_nacked` with delivery metadata, attempt number, reason, timestamp, and either a `retry_scheduled` or `dead_lettered` outcome.
 - `retry_maintenance_applied` with expired pending delivery outcomes and retry entries made available.
 
-On reopen, `DurableBroker` replays the broker-state log, reopens message partition logs, reconstructs round-robin state from recovered unkeyed message count, and releases any still-pending delivery for immediate at-least-once redelivery while preserving its attempt count. Successfully ACKed messages are not redelivered after reopen. UnACKed messages may be redelivered after reopen, so consumers must be idempotent.
+On reopen, `DurableBroker` replays the broker-state log, reopens and fully scans
+message partition logs, reconstructs round-robin state from recovered unkeyed
+message count, rebuilds the topic-scoped publish-idempotency index from keyed
+records, and releases any still-pending delivery for immediate at-least-once
+redelivery while preserving its attempt count. The message log remains the sole
+durable idempotency source; no ledger or broker-state publish event exists.
+Successfully ACKed messages are not redelivered after reopen. UnACKed messages
+may be redelivered after reopen, so consumers must be idempotent. Recovery time
+is proportional to retained records, and in-memory index growth is unbounded
+while unique keyed records remain retained.
 
 ## Crash Recovery
 

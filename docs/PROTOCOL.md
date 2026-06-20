@@ -65,7 +65,7 @@ The service is unary-only:
 - `Ack(AckRequest) -> AckResponse`.
 - `Nack(NackRequest) -> NackResponse`.
 
-`PublishRequest` carries `topic`, `message_id`, `key`, `payload`, `content_type`, `type`, `source`, `subject`, `idempotency_key`, and `time_unix_ms`. `topic`, `message_id`, `content_type`, `type`, and `source` are required by validation. Empty `key`, `subject`, and `idempotency_key` mean absent optional metadata. Empty payloads are valid opaque payload bytes. `time_unix_ms` is a Unix timestamp in milliseconds. `idempotency_key` enables durable publish idempotency: a non-empty key scopes deduplication by `(topic, key)`. An equivalent retry returns the original partition, offset, and `message_id` with `deduplicated = true`. Conflicting reuse is rejected with `ALREADY_EXISTS`.
+`PublishRequest` carries `topic`, `message_id`, `key`, `payload`, `content_type`, `type`, `source`, `subject`, `idempotency_key`, and `time_unix_ms`. `topic`, `message_id`, `content_type`, `type`, and `source` are required by validation. Empty `key`, `subject`, and `idempotency_key` mean absent optional metadata. Empty payloads are valid opaque payload bytes. `time_unix_ms` is a Unix timestamp in milliseconds. `idempotency_key` enables durable publish idempotency: a non-empty key scopes deduplication by `(topic, key)`. An equivalent retry returns the original partition, offset, and `message_id` with `deduplicated = true`. Conflicting reuse is rejected with `ALREADY_EXISTS` and the sanitized detail `idempotency key conflict`. `PublishResponse.deduplicated` remains field 5; old payloads that omit it decode as `false`, and unknown fields remain tolerated by protobuf readers.
 
 `ConsumeRequest` carries `topic`, `consumer_group`, `consumer_id`, `max_messages`, `lease_ms`, and `now_unix_ms`. `topic`, `consumer_group`, and `consumer_id` are required by validation. `max_messages` and `lease_ms` must be greater than zero. `now_unix_ms` is a caller-supplied Unix millisecond timestamp used for deterministic consume, retry, and lease-expiry decisions. Consume responses include delivery ID, topic, partition, offset, envelope metadata, consumer ownership, attempt number, delivery timestamp, and lease deadline.
 
@@ -85,7 +85,9 @@ cargo run -p msg-runtime --bin brokerd -- serve-all \
 creation/status/DLQ/metrics and gRPC publish/consume/ACK/NACK. `brokerd
 serve-grpc` remains a gRPC-only runtime. In split-process mode, `brokerd serve`
 and `brokerd serve-grpc` each load durable state at startup, do not live-reload
-peer process mutations, and keep separate process-local metrics.
+peer process mutations, and keep separate process-local metrics. They do not
+share a mutation lock and must not be treated as a coordinated concurrent-write
+runtime for one data directory.
 
 ## Observability Boundary
 
@@ -108,6 +110,8 @@ version is `ferrumq.dataplane.v1`.
 ## Compatibility Rules
 
 - Unknown fields should not change broker behavior unless a version says they do.
+- `PublishResponse.deduplicated = 5` is additive and defaults to `false` when
+  absent.
 - Message IDs must remain stable across retries and redeliveries.
 - Ordering guarantees apply only within a topic partition.
 - Delivery is local durable at-least-once; consumers must be idempotent.
@@ -115,4 +119,4 @@ version is `ferrumq.dataplane.v1`.
 
 ## Error Contract Direction
 
-Data-plane gRPC errors use stable tonic status codes and sanitized messages. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and unknown, duplicate, or stale deliveries map to `NOT_FOUND`; wrong consumer ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if surfaced; unavailable broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected failures map to `INTERNAL`.
+Data-plane gRPC errors use stable tonic status codes and sanitized messages. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and unknown, duplicate, or stale deliveries map to `NOT_FOUND`; wrong consumer ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if surfaced; publish idempotency conflicts map to `ALREADY_EXISTS` with detail `idempotency key conflict`; unavailable broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected failures map to `INTERNAL`.

@@ -6,9 +6,10 @@ use msg_broker::{
 };
 use msg_core::{
     ConsumerGroupId, ConsumerId, ContentType, DeadLetterReason, EventSource, EventType,
-    IdempotencyKey, MessageId, MessageTimestamp, Offset, PartitionKey, RetryPolicy, TopicConfig,
-    TopicName,
+    IdempotencyKey, MessageId, MessageTimestamp, Offset, PartitionId, PartitionKey, RetryPolicy,
+    TopicConfig, TopicName,
 };
+use proptest::prelude::*;
 
 fn timestamp(value: u64) -> MessageTimestamp {
     MessageTimestamp::from_unix_millis(value)
@@ -541,6 +542,24 @@ fn first_publish_with_idempotency_key_is_not_deduplicated() {
 }
 
 #[test]
+fn unknown_topic_validation_precedes_idempotency_mutation() {
+    let mut broker = broker();
+    let error = broker
+        .publish(PublishCommand::new(
+            topic_name(),
+            idempotent_envelope("msg-failed", "idem-reusable", b"payload"),
+        ))
+        .unwrap_err();
+    assert!(matches!(error, BrokerError::TopicNotFound { .. }));
+
+    create_topic(&mut broker, 2);
+    let committed = publish_idempotent(&mut broker, "msg-committed", "idem-reusable", b"payload");
+    assert!(!committed.deduplicated());
+    assert_eq!(committed.partition_id(), PartitionId::new(0));
+    assert_eq!(committed.offset(), Offset::new(0));
+}
+
+#[test]
 fn equivalent_retry_returns_original_identity_and_is_deduplicated() {
     let mut broker = broker();
     create_topic(&mut broker, 3);
@@ -710,4 +729,56 @@ fn duplicate_retry_does_not_create_another_consumer_visible_delivery() {
     publish_idempotent(&mut broker, "msg-1-retry", "idem-1", br#"{"ok":true}"#);
     let second_batch = consume(&mut broker, group_id(), consumer_id(), 10, 12);
     assert_eq!(second_batch.len(), 0);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn equivalent_retries_preserve_identity_and_record_count(
+        payload in proptest::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let mut broker = broker();
+        create_topic(&mut broker, 3);
+
+        let first = publish_idempotent(&mut broker, "msg-first", "idem-property", &payload);
+        let retry = publish_idempotent(&mut broker, "msg-retry", "idem-property", &payload);
+
+        prop_assert!(!first.deduplicated());
+        prop_assert!(retry.deduplicated());
+        prop_assert_eq!(retry.partition_id(), first.partition_id());
+        prop_assert_eq!(retry.offset(), first.offset());
+        prop_assert_eq!(retry.message_id(), first.message_id());
+        prop_assert_eq!(
+            consume(&mut broker, group_id(), consumer_id(), 100, 10).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn conflicts_do_not_mutate_records_or_round_robin_state(
+        payload in proptest::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let mut broker = broker();
+        create_topic(&mut broker, 3);
+        let first = publish_idempotent(&mut broker, "msg-first", "idem-property", &payload);
+        prop_assert_eq!(first.partition_id(), PartitionId::new(0));
+
+        let mut conflicting_payload = payload;
+        conflicting_payload.push(0xff);
+        let conflict = broker.publish(PublishCommand::new(
+            topic_name(),
+            idempotent_envelope("msg-conflict", "idem-property", &conflicting_payload),
+        ));
+        let is_conflict =
+            matches!(conflict, Err(BrokerError::IdempotencyKeyConflict { .. }));
+        prop_assert!(is_conflict);
+
+        let next = publish(&mut broker, "msg-next");
+        prop_assert_eq!(next.partition_id(), PartitionId::new(1));
+        prop_assert_eq!(
+            consume(&mut broker, group_id(), consumer_id(), 100, 10).len(),
+            2
+        );
+    }
 }
