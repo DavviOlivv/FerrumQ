@@ -201,6 +201,7 @@ fn postgres_help_documents_migrate_and_rebuild() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("migrate"));
     assert!(stdout.contains("rebuild"));
+    assert!(stdout.contains("search"));
 }
 
 #[cfg(feature = "postgres")]
@@ -279,6 +280,103 @@ fn postgres_connection_errors_do_not_expose_credentials_or_query_parameters() {
     assert!(!stderr.contains("database-secret"));
     assert!(!stderr.contains("query-secret"));
     assert!(!stderr.contains(database_url));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_search_help_documents_options() {
+    let output = brokerd()
+        .args(["postgres", "search", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--query"));
+    assert!(stdout.contains("--topic"));
+    assert!(stdout.contains("--limit"));
+    assert!(stdout.contains("--database-url"));
+    assert!(stdout.contains("--json"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_search_requires_database_url() {
+    let output = brokerd()
+        .args(["postgres", "search", "--query", "order"])
+        .env_remove("FERRUMQ_DATABASE_URL")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("missing database URL"));
+    assert!(stderr.contains("FERRUMQ_DATABASE_URL"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_search_blank_query_is_rejected() {
+    let output = brokerd()
+        .args([
+            "postgres",
+            "search",
+            "--query",
+            "   ",
+            "--database-url",
+            "postgres://user:secret@127.0.0.1:1/postgres",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("alphanumeric"));
+    assert!(!stderr.contains("user:secret"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_search_punctuation_only_query_is_rejected() {
+    let output = brokerd()
+        .args([
+            "postgres",
+            "search",
+            "--query",
+            "...",
+            "--database-url",
+            "postgres://user:secret@127.0.0.1:1/postgres",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("alphanumeric"));
+    assert!(!stderr.contains("user:secret"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_search_invalid_limit_is_rejected() {
+    let output = brokerd()
+        .args([
+            "postgres",
+            "search",
+            "--query",
+            "order",
+            "--limit",
+            "0",
+            "--database-url",
+            "postgres://user:secret@127.0.0.1:1/postgres",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("search limit"));
+    assert!(!stderr.contains("user:secret"));
 }
 
 #[test]

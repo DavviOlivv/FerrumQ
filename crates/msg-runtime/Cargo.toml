@@ -26,6 +26,7 @@ postgres = ["msg-postgres"]
 msg-protocol = { path = "../msg-protocol" }
 serde_json = "1"
 tempfile = "3"
+tracing-subscriber.workspace = true
 
 [lib]
 path = "src/lib.rs"

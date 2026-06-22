@@ -52,6 +52,15 @@ pub enum PostgresError {
     #[error("projection source layout is invalid")]
     InvalidProjectionSource,
 
+    #[error("search query must contain at least one alphanumeric character")]
+    EmptySearchQuery,
+
+    #[error("search limit must be between 1 and 100")]
+    InvalidSearchLimit,
+
+    #[error("search result serialization failed")]
+    SearchResultSerializationFailed(#[source] serde_json::Error),
+
     #[error("projection source I/O failed")]
     Io(#[source] std::io::Error),
 

@@ -63,15 +63,19 @@ PostgreSQL is an optional metadata store. If PostgreSQL is unavailable:
 
 - Normal broker publish, consume, ACK, and NACK continue working.
 - `brokerd serve`, `brokerd serve-grpc`, and `brokerd serve-all` are unaffected.
-- `brokerd postgres migrate` and `brokerd postgres rebuild` fail with a clear
-  connection error. The error message is sanitized and does not include the
-  database password, URL query parameters, or full connection URL.
+- `brokerd postgres migrate`, `brokerd postgres rebuild`, and
+  `brokerd postgres search` fail with a clear connection error. The error
+  message is sanitized and does not include the database password, URL query
+  parameters, or full connection URL.
 - Migration, query, broker-state, storage, and projection failures are reported
   without payloads, idempotency keys, partition keys, credentials, or
   filesystem paths.
 - Projection runs normally transition from `in_progress` to `success` or
   `error`. Loss of database connectivity can prevent the final status update,
   so an interrupted run may remain `in_progress`.
+- `brokerd postgres search` validates the query string (non-empty, contains
+  alphanumeric characters) and limit (1..=100) before connecting to the
+  database, so invalid input fails immediately with a clear error.
 - `make ci` and all existing tests pass without PostgreSQL.
 - The append-only message log remains operational as the source of truth.
 

@@ -34,6 +34,12 @@ tracing. They log one sanitized database target with passwords masked and URL
 query parameters omitted. Their errors do not log credentials, payloads, keys,
 or filesystem paths.
 
+`brokerd postgres search` also initializes tracing and logs the sanitized
+database target, result count, limit, output mode, and whether a topic filter
+was provided. It never logs the raw query or topic filter. Query and limit
+validation happen before any database connection, so invalid input fails
+immediately without logging a connection attempt.
+
 Examples:
 
 ```sh

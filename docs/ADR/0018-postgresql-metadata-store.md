@@ -155,5 +155,6 @@ sufficient for this use case.
 - [docs/ARCHITECTURE.md](../ARCHITECTURE.md)
 - [docs/STORAGE_FORMAT.md](../STORAGE_FORMAT.md)
 - [docs/BROKER_STATE_FORMAT.md](../BROKER_STATE_FORMAT.md)
+- [ADR 0019: PostgreSQL Full-Text Search Foundation](0019-postgresql-full-text-search.md)
 - [msg-storage crate](../../crates/msg-storage)
 - [msg-postgres crate](../../crates/msg-postgres)
