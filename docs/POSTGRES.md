@@ -31,18 +31,38 @@ PostgreSQL is unavailable, the broker continues working normally.
 
 ### Local PostgreSQL with Docker
 
+The optional Make targets manage a disposable PostgreSQL 16 container for
+local development:
+
 ```sh
-docker run --name ferrumq-postgres \
-  -e POSTGRES_PASSWORD=ferrumq \
-  -p 5432:5432 \
-  -d postgres:16-alpine
+make postgres-up
+make postgres-wait
 ```
 
-Set the connection URL:
+The defaults are:
+
+- `POSTGRES_CONTAINER=ferrumq-postgres`
+- `POSTGRES_PORT=5432`
+- `POSTGRES_PASSWORD=ferrumq`
+
+Override them consistently for each target when the defaults conflict with
+another local service:
+
+```sh
+make postgres-up POSTGRES_CONTAINER=ferrumq-dev POSTGRES_PORT=55432 \
+  POSTGRES_PASSWORD=local-only
+make postgres-wait POSTGRES_CONTAINER=ferrumq-dev
+```
+
+Set the matching connection URL for runtime commands:
 
 ```sh
 export FERRUMQ_DATABASE_URL=postgres://postgres:ferrumq@localhost:5432/postgres
 ```
+
+`make postgres-down` forcibly removes the configured container and its
+container-local data. These PostgreSQL targets are optional local-development
+helpers and are not part of `make ci`.
 
 ## Commands
 
@@ -66,6 +86,57 @@ Migrations are idempotent. Running `migrate` multiple times is safe. Execution
 is serialized with a PostgreSQL advisory transaction lock. Applied versions and
 names are rechecked while serialized, schema SQL and tracking rows commit
 atomically, and failed migrations are not registered.
+
+### `brokerd postgres search`
+
+Searches projected message metadata using PostgreSQL full-text search.
+
+```sh
+brokerd postgres search \
+  --database-url "$FERRUMQ_DATABASE_URL" \
+  --query "order created"
+
+# Optional topic filter
+brokerd postgres search \
+  --database-url "$FERRUMQ_DATABASE_URL" \
+  --query "payment" \
+  --topic orders \
+  --limit 20
+
+# JSON output
+brokerd postgres search \
+  --database-url "$FERRUMQ_DATABASE_URL" \
+  --query "order" \
+  --json
+```
+
+The search:
+
+1. Runs migrations to ensure search columns exist.
+2. Validates the query (non-empty, contains alphanumeric characters) and
+   limit (1..=100).
+3. Executes the search using `websearch_to_tsquery('simple', $query)` with
+   bind parameters only.
+4. Returns results in human-readable or JSON format.
+
+**Searchable fields**: `message_id`, `topic`, `event_type`, `source`,
+`subject` (optional), `content_type`.
+
+**Explicitly NOT searched**: raw payload bytes, `payload_sha256`,
+`idempotency_key`, `partition_key`, header keys/values, `time_unix_ms`.
+
+**Search results do not expose**: `idempotency_key`, `partition_key`,
+`headers`, or raw payload bytes. Only safe projected metadata, payload
+length, payload SHA-256, and the FTS rank are returned.
+
+**Ordering**: `rank DESC, time_unix_ms DESC, topic ASC, partition_id ASC,
+message_offset ASC`.
+
+**Text search configuration**: `simple` (no stemming, preserves technical
+identifiers exactly).
+
+See [ADR 0019](ADR/0019-postgresql-full-text-search.md) for the full
+design rationale.
 
 ### `brokerd postgres rebuild`
 
@@ -164,6 +235,14 @@ postgres://[user[:password]@][host][:port][/database][?options]
 | `headers` | `JSONB NOT NULL` | Message headers as key-value pairs |
 | `time_unix_ms` | `BIGINT NOT NULL` | Message timestamp in Unix milliseconds |
 | `indexed_at` | `TIMESTAMPTZ NOT NULL` | When this row was projected |
+| `search_text` | `TEXT NOT NULL` | Derived search text (Milestone 16) |
+| `search_vector` | `TSVECTOR NOT NULL` | PostgreSQL FTS vector (Milestone 16) |
+
+**Full-text search index** (Milestone 16):
+
+| Index | Table | Columns | Method |
+|-------|-------|---------|--------|
+| `idx_messages_search_vector` | `ferrumq_messages` | `search_vector` | GIN |
 
 **Primary key:** `(topic, partition_id, message_offset)`.
 **Unique constraint:** `(topic, message_id)` — same `message_id` at a different
@@ -188,13 +267,32 @@ completion/error fields.
 
 ## Testing
 
-Integration tests require a running PostgreSQL instance. Set the
-`FERRUMQ_POSTGRES_TEST_URL` environment variable:
+The local workflow starts the disposable container, waits for readiness, runs
+both PostgreSQL test suites, and removes the container afterward:
 
 ```sh
-export FERRUMQ_POSTGRES_TEST_URL=postgres://postgres:ferrumq@localhost:5432/postgres
+make postgres-up
+make postgres-test
+make postgres-down
+```
+
+`postgres-test` depends on `postgres-wait` and runs:
+
+```sh
 cargo test -p msg-postgres
-cargo nextest run -p msg-postgres
+cargo nextest run -p msg-postgres --no-fail-fast
+```
+
+Both commands receive a generated `FERRUMQ_POSTGRES_TEST_URL` using
+`POSTGRES_PORT` and `POSTGRES_PASSWORD`. When using overrides, pass the same
+values to `postgres-up` and `postgres-test`:
+
+```sh
+make postgres-up POSTGRES_CONTAINER=ferrumq-dev POSTGRES_PORT=55432 \
+  POSTGRES_PASSWORD=local-only
+make postgres-test POSTGRES_CONTAINER=ferrumq-dev POSTGRES_PORT=55432 \
+  POSTGRES_PASSWORD=local-only
+make postgres-down POSTGRES_CONTAINER=ferrumq-dev
 ```
 
 Each test creates a unique PostgreSQL schema (e.g. `test_migration_0`) and
@@ -210,10 +308,20 @@ cargo test -p msg-postgres
 
 - **Not a source of truth.** PostgreSQL does not own publish, delivery, cursor,
   retry, DLQ, idempotency, or recovery state.
-- **No full-text search.** FTS, `tsvector`, `pg_trgm`, and `unaccent` are
-  deferred to a future search milestone.
+- **Search is limited to the `brokerd postgres search` command.** HTTP, gRPC,
+  SDK, CLI, TUI, and chat search interfaces are deferred to a future milestone
+  (planned for M17).
+- **Search covers safe metadata only.** Raw payload bytes, `idempotency_key`,
+  `partition_key`, header keys/values, and `payload_sha256` are not indexed or
+  returned. Payload search and file/blob search are deferred.
+- **`simple` text search configuration.** The `simple` parser does not
+  tokenize on `/` or `+` (e.g. `application/cloudevents+json` is kept as a
+  single token). `pg_trgm`, `unaccent`, and semantic/vector embeddings are
+  deferred.
 - **No continuous projection worker.** The rebuild is currently an offline
-  command. Live metadata streaming from the broker is deferred.
+  command. Live metadata streaming from the broker is deferred. Search results
+  are a point-in-time snapshot; fresh publishes require a rebuild to become
+  searchable.
 - **No automatic cleanup or retention.** Projection data grows with the
   message log. Retention policies are deferred.
 - **No raw payload storage.** Payload contents are never stored in PostgreSQL.
@@ -228,6 +336,7 @@ cargo test -p msg-postgres
 ## Related Documents
 
 - [ADR 0018: PostgreSQL Metadata Store](ADR/0018-postgresql-metadata-store.md)
+- [ADR 0019: PostgreSQL Full-Text Search Foundation](ADR/0019-postgresql-full-text-search.md)
 - [Architecture](ARCHITECTURE.md)
 - [SDD](SDD.md)
 - [Storage Format](STORAGE_FORMAT.md)

@@ -186,10 +186,11 @@ docs/                Architecture, protocol, operation, release, and API docs
 
 ## PostgreSQL Metadata Store (Optional)
 
-FerrumQ can project message metadata into PostgreSQL for query and
-operational tooling. PostgreSQL is **not** required — the broker works
-without it. See [docs/POSTGRES.md](docs/POSTGRES.md) and
-[ADR 0018](docs/ADR/0018-postgresql-metadata-store.md).
+FerrumQ can project message metadata into PostgreSQL for query,
+operational tooling, and full-text search. PostgreSQL is **not** required
+— the broker works without it. See [docs/POSTGRES.md](docs/POSTGRES.md),
+[ADR 0018](docs/ADR/0018-postgresql-metadata-store.md), and
+[ADR 0019](docs/ADR/0019-postgresql-full-text-search.md).
 
 ```sh
 # Run migrations
@@ -197,6 +198,9 @@ brokerd postgres migrate --database-url "$DATABASE_URL"
 
 # Rebuild the metadata projection from the message log
 brokerd postgres rebuild --data-dir ./.ferrumq --database-url "$DATABASE_URL"
+
+# Search projected message metadata
+brokerd postgres search --database-url "$DATABASE_URL" --query "order created"
 ```
 
 ## Docs Index

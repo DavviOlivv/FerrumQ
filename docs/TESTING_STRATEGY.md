@@ -132,9 +132,36 @@ Covered scenarios:
   partition layouts, sanitized failures, and no catchable lingering
   `in_progress` rows.
 
+Milestone 16 extends the PostgreSQL integration suite with full-text
+search coverage:
+
+- Migration 002 creates `search_text`, `search_vector`, and the GIN index;
+  existing rows are backfilled in place; the migration is safe to rerun.
+- New projected rows receive a non-empty `search_vector`.
+- Search finds `message_id`, `event_type`, `source`, `subject`, and
+  `content_type`.
+- Exact topic filtering returns only rows from the requested topic.
+- Empty, blank, and punctuation-only queries are rejected with
+  `EmptySearchQuery` before reaching the database.
+- Limits outside `1..=100` are rejected with `InvalidSearchLimit`.
+- Ordering is deterministic for ties.
+- Raw payload-only content is not searchable.
+- Search results do not expose `idempotency_key`, `partition_key`,
+  `headers`, or raw payload bytes.
+- Rebuild twice does not duplicate rows and search still works.
+- Empty topics do not produce fake message results.
+- A pre-Milestone-16 database (migration 001 only) upgraded in place to
+  migration 002 gets searchable rows.
+- The Rust `compute_search_text` function matches the SQL `concat_ws`
+  backfill expression for rows with and without subject.
+- Runtime CLI smoke tests cover `brokerd postgres search --help`, missing
+  query, punctuation-only query, and invalid limit; all error paths
+  sanitize credentials.
+
 No unit test or existing test depends on PostgreSQL. The crate's unit tests
-(config precedence, URL sanitization, payload hash computation, row mapping)
-run without any database.
+(config precedence, URL sanitization, payload hash computation, row mapping,
+search text computation, query validation, limit validation) run without
+any database.
 
 For release-facing validation, use PostgreSQL 16, wait for readiness with
 `pg_isready`, and run both Cargo and nextest suites with

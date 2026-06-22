@@ -616,3 +616,53 @@ Deferred from Milestone 15:
 - Authenticated/encrypted PostgreSQL connections.
 - Projection retention or cleanup.
 - New public gRPC or HTTP data-plane contracts.
+
+## Milestone 16: PostgreSQL Full-Text Search Foundation
+
+- Optional PostgreSQL full-text search over projected metadata.
+- Append-only log remains source of truth; FTS is a derived index.
+- Append-only migration 002 adds `search_text`, `search_vector` (TSVECTOR),
+  and a GIN index on `search_vector`. Migration 001 is not modified.
+- Search covers safe projected metadata only: `message_id`, `topic`,
+  `event_type`, `source`, `subject` (optional), `content_type`.
+- Search does NOT cover: raw payload bytes, `payload_sha256`,
+  `idempotency_key`, `partition_key`, header keys/values, `time_unix_ms`.
+- `simple` text search configuration (no stemming, preserves technical
+  identifiers).
+- `websearch_to_tsquery('simple', $query)` with bind parameters for safe
+  user-facing query syntax.
+- Shared `compute_search_text` function in Rust, matching the SQL
+  `concat_ws` backfill expression. Parity verified by unit and
+  integration tests.
+- `brokerd postgres search --query <QUERY> [--topic <TOPIC>] [--limit N] [--json]`.
+- Query validation: empty, blank, and punctuation-only queries are
+  rejected with `EmptySearchQuery` before reaching the database. Limits
+  outside `1..=100` are rejected with `InvalidSearchLimit`.
+- Deterministic ordering: `rank DESC, time_unix_ms DESC, topic ASC,
+  partition_id ASC, message_offset ASC`.
+- Search results exclude `idempotency_key`, `partition_key`, `headers`,
+  and raw payload bytes.
+- Upgrade-path test: a pre-Milestone-16 database (migration 001 only with
+  existing rows) is upgraded in-place to migration 002 and becomes
+  searchable.
+- Real PostgreSQL integration tests behind `FERRUMQ_POSTGRES_TEST_URL`.
+- Runtime CLI smoke tests for `brokerd postgres search --help`, missing
+  query, punctuation-only query, and invalid limit.
+- `make ci` passes without PostgreSQL.
+- No new public gRPC or HTTP contracts.
+- No continuous projection worker (search is offline, requires rebuild).
+- No metrics added.
+- Sanitized connection, migration, query, source-data, and search errors.
+- Documentation: `docs/POSTGRES.md`, ADR 0019.
+
+Status: implemented.
+
+Deferred from Milestone 16:
+
+- HTTP/gRPC/SDK/CLI/TUI/chat search interfaces (planned for M17).
+- Semantic/vector embeddings.
+- Header key/value search.
+- `pg_trgm`, `unaccent` extensions.
+- File/blob payload search.
+- Continuous live indexing.
+- Search metrics.

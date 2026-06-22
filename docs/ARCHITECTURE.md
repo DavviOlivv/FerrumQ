@@ -24,6 +24,8 @@ The monolith is modular through crate boundaries:
   implements offline rebuild (`brokerd postgres rebuild`). It reuses
   `msg-broker` recovery for validated topic metadata and `msg-storage` recovery
   for partition scanning; it is not wired into live broker mutation paths.
+  Milestone 16 adds full-text search over safe projected metadata
+  (`brokerd postgres search`).
 - `msg-test-harness`: deterministic test and failure-simulation helpers.
 
 ## Hexagonal Architecture

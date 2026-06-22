@@ -4,10 +4,16 @@ use tracing::info;
 use crate::PostgresError;
 
 const MIGRATION_LOCK_ID: i64 = 0x4665_7272_756d_510f;
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "001_initial_schema",
-    include_str!("../migrations/001_initial_schema.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "001_initial_schema",
+        include_str!("../migrations/001_initial_schema.sql"),
+    ),
+    (
+        "002_full_text_search",
+        include_str!("../migrations/002_full_text_search.sql"),
+    ),
+];
 
 /// Runs all pending migrations against the given pool.
 ///

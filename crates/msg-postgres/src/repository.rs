@@ -6,7 +6,9 @@ use tracing::info;
 use crate::{
     PostgresError,
     config::{PostgresConfig, log_database_target},
-    models::{MessageRow, ProjectionResult, TopicRow},
+    models::{
+        MessageRow, ProjectionResult, SearchQuery, SearchResult, TopicRow, compute_search_text,
+    },
 };
 
 /// Async PostgreSQL repository for the FerrumQ metadata projection store.
@@ -94,13 +96,22 @@ impl PostgresRepository {
     /// A different location with the same `message_id` hits the
     /// unique constraint on (topic, message_id), which returns a constraint
     /// violation error that we translate.
+    ///
+    /// `search_text` is derived from safe metadata fields via
+    /// `compute_search_text`, and `search_vector` is computed in SQL via
+    /// `to_tsvector('simple', search_text)`. Raw payload bytes,
+    /// `payload_sha256`, `idempotency_key`, and `partition_key` are not
+    /// included in the search text.
     pub async fn upsert_message(&self, row: &MessageRow) -> Result<(), PostgresError> {
+        let search_text = compute_search_text(row);
         let result = sqlx::query(
             "INSERT INTO ferrumq_messages
              (topic, partition_id, message_offset, message_id, idempotency_key,
               partition_key, payload_len, payload_sha256, content_type,
-              event_type, source, subject, headers, time_unix_ms)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+              event_type, source, subject, headers, time_unix_ms,
+              search_text, search_vector)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                     $15, to_tsvector('simple', $15))
              ON CONFLICT (topic, partition_id, message_offset) DO NOTHING",
         )
         .bind(&row.topic)
@@ -117,6 +128,7 @@ impl PostgresRepository {
         .bind(&row.subject)
         .bind(&row.headers)
         .bind(row.time_unix_ms)
+        .bind(&search_text)
         .execute(self.pool())
         .await;
 
@@ -131,6 +143,46 @@ impl PostgresRepository {
             }
             Err(source) => Err(PostgresError::query("message upsert", source)),
         }
+    }
+
+    /// Searches projected message metadata using PostgreSQL full-text search.
+    ///
+    /// The query is validated before reaching the database: empty, blank, or
+    /// punctuation-only inputs return `EmptySearchQuery`; limits outside
+    /// `1..=100` return `InvalidSearchLimit`. All user input is bound as
+    /// parameters; no string concatenation is used.
+    ///
+    /// Ordering is deterministic:
+    /// `rank DESC, time_unix_ms DESC, topic ASC, partition_id ASC, message_offset ASC`.
+    pub async fn search_messages(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<Vec<SearchResult>, PostgresError> {
+        let limit = i64::from(query.limit());
+        let topic_filter: Option<String> = query.topic().map(str::to_owned);
+        let rows: Vec<SearchResult> = sqlx::query_as(
+            "WITH q AS (
+                 SELECT websearch_to_tsquery('simple', $1) AS tsq
+             )
+             SELECT m.topic, m.partition_id, m.message_offset, m.message_id, m.event_type,
+                    m.source, m.subject, m.content_type, m.time_unix_ms, m.payload_len,
+                    m.payload_sha256,
+                    ts_rank(m.search_vector, q.tsq) AS rank
+             FROM ferrumq_messages m
+             CROSS JOIN q
+             WHERE m.search_vector @@ q.tsq
+               AND ($2::text IS NULL OR m.topic = $2)
+             ORDER BY rank DESC, m.time_unix_ms DESC, m.topic ASC,
+                      m.partition_id ASC, m.message_offset ASC
+             LIMIT $3",
+        )
+        .bind(query.query())
+        .bind(topic_filter)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|source| PostgresError::query("message search", source))?;
+        Ok(rows)
     }
 
     /// Records the start of a projection run.
