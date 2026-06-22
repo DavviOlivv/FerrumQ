@@ -192,6 +192,95 @@ fn serve_all_help_documents_defaults() {
     assert!(stdout.contains("127.0.0.1:9090"));
 }
 
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_help_documents_migrate_and_rebuild() {
+    let output = brokerd().args(["postgres", "--help"]).output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("migrate"));
+    assert!(stdout.contains("rebuild"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_subcommand_help_documents_database_and_data_options() {
+    let migrate = brokerd()
+        .args(["postgres", "migrate", "--help"])
+        .output()
+        .unwrap();
+    assert!(migrate.status.success());
+    let migrate_stdout = String::from_utf8(migrate.stdout).unwrap();
+    assert!(migrate_stdout.contains("--database-url"));
+
+    let rebuild = brokerd()
+        .args(["postgres", "rebuild", "--help"])
+        .output()
+        .unwrap();
+    assert!(rebuild.status.success());
+    let rebuild_stdout = String::from_utf8(rebuild.stdout).unwrap();
+    assert!(rebuild_stdout.contains("--database-url"));
+    assert!(rebuild_stdout.contains("--data-dir"));
+    assert!(rebuild_stdout.contains("./.ferrumq"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_commands_require_a_database_url() {
+    let output = brokerd()
+        .args(["postgres", "migrate"])
+        .env_remove("FERRUMQ_DATABASE_URL")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("missing database URL"));
+    assert!(stderr.contains("FERRUMQ_DATABASE_URL"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_commands_reject_invalid_urls_and_flag_precedes_environment() {
+    let output = brokerd()
+        .args([
+            "postgres",
+            "migrate",
+            "--database-url",
+            "not-a-postgres-url",
+        ])
+        .env(
+            "FERRUMQ_DATABASE_URL",
+            "postgres://user:environment-secret@127.0.0.1:1/postgres",
+        )
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid database URL"));
+    assert!(!stderr.contains("environment-secret"));
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_connection_errors_do_not_expose_credentials_or_query_parameters() {
+    let database_url = "postgres://user:database-secret@127.0.0.1:1/postgres?connect_timeout=1&password=query-secret";
+    let output = brokerd()
+        .args(["postgres", "migrate", "--database-url", database_url])
+        .env("RUST_LOG", "info")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("database connection failed"));
+    assert!(!stderr.contains("database-secret"));
+    assert!(!stderr.contains("query-secret"));
+    assert!(!stderr.contains(database_url));
+}
+
 #[test]
 fn invalid_listen_address_fails_cleanly() {
     let output = brokerd()

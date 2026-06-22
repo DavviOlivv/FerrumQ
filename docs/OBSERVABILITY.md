@@ -29,6 +29,11 @@ Any other value fails startup for `brokerd serve-all`, `brokerd serve`, and
 `brokerd serve-grpc`. Commands that do not initialize tracing, such as
 `brokerd --version`, are not affected by this environment variable.
 
+`brokerd postgres migrate` and `brokerd postgres rebuild` also initialize
+tracing. They log one sanitized database target with passwords masked and URL
+query parameters omitted. Their errors do not log credentials, payloads, keys,
+or filesystem paths.
+
 Examples:
 
 ```sh
@@ -89,6 +94,9 @@ Metrics intentionally use low-cardinality labels only:
 
 Topic names, message payloads, delivery IDs, message IDs, consumer IDs, and
 filesystem paths are not metric labels.
+
+Milestone 15 adds no PostgreSQL metric families. Projection runs are offline
+administrative records in PostgreSQL, not process-local broker metrics.
 
 ## Metric Names
 

@@ -18,6 +18,12 @@ The monolith is modular through crate boundaries:
 - `msg-observability`: shared observability helpers. Milestone 9 implements
   tracing initialization, stable metric names, a process-local counter registry,
   and Prometheus text rendering.
+- `msg-postgres`: optional PostgreSQL metadata/projection store for query,
+  search, dashboards, and operational tooling. The append-only log remains the
+  source of truth; broker correctness never depends on PostgreSQL. Milestone 15
+  implements offline rebuild (`brokerd postgres rebuild`). It reuses
+  `msg-broker` recovery for validated topic metadata and `msg-storage` recovery
+  for partition scanning; it is not wired into live broker mutation paths.
 - `msg-test-harness`: deterministic test and failure-simulation helpers.
 
 ## Hexagonal Architecture

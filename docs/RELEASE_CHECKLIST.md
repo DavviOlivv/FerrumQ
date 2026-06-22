@@ -18,6 +18,9 @@ candidate.
   reuse is rejected. Idempotency records live for the lifetime of retained
   local broker data.
 - Message payloads are not claimed to be logged or exposed as metric labels.
+- PostgreSQL is described only as an optional offline derived metadata
+  projection. It is not a broker source of truth, live worker, payload store,
+  delivery guarantee, or exactly-once mechanism.
 
 ## Version Gate
 
@@ -50,6 +53,9 @@ candidate.
   not metric labels.
 - Any remaining milestone history is clearly historical or deep reference
   material, not the primary release status.
+- PostgreSQL docs use `message_offset`, document stable topic timestamps,
+  transactional migration tracking, sanitized failures, and the possible stale
+  `in_progress` row after database connectivity loss.
 
 ## Validation Gate
 

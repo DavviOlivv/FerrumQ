@@ -36,6 +36,8 @@ systems work:
 - `packages/sdk`: `@ferrumq/sdk`, typed TypeScript client for the HTTP control
   plane and unary gRPC data plane with payload encoding and error handling.
 - `packages/chat`: `@ferrumq/chat`, multi-terminal chat example built on the SDK.
+- `crates/msg-postgres`: optional PostgreSQL metadata/projection store (offline
+  rebuild only; broker correctness does not depend on it).
 
 The design is a modular monolith with hexagonal boundaries. Broker behavior
 stays in Rust; TypeScript packages are adapters or client-side helpers.
@@ -182,6 +184,21 @@ docs/                Architecture, protocol, operation, release, and API docs
 .github/workflows/   CI entrypoint that runs the local harness
 ```
 
+## PostgreSQL Metadata Store (Optional)
+
+FerrumQ can project message metadata into PostgreSQL for query and
+operational tooling. PostgreSQL is **not** required — the broker works
+without it. See [docs/POSTGRES.md](docs/POSTGRES.md) and
+[ADR 0018](docs/ADR/0018-postgresql-metadata-store.md).
+
+```sh
+# Run migrations
+brokerd postgres migrate --database-url "$DATABASE_URL"
+
+# Rebuild the metadata projection from the message log
+brokerd postgres rebuild --data-dir ./.ferrumq --database-url "$DATABASE_URL"
+```
+
 ## Docs Index
 
 - [Architecture](docs/ARCHITECTURE.md)
@@ -199,6 +216,7 @@ docs/                Architecture, protocol, operation, release, and API docs
 - [Local Demo](docs/LOCAL_DEMO.md)
 - [Release Checklist](docs/RELEASE_CHECKLIST.md)
 - [Milestones](docs/MILESTONES.md)
+- [PostgreSQL Metadata Store](docs/POSTGRES.md)
 - [ADRs](docs/ADR/)
 
 ## Status

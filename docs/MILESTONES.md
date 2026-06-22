@@ -569,3 +569,50 @@ Deferred from Milestone 14:
 - Automatic SDK publish retries.
 - Clustering or replicated idempotency.
 - PostgreSQL or Redis-backed idempotency.
+
+## Milestone 15: PostgreSQL Metadata Store
+
+- Optional PostgreSQL metadata/projection layer.
+- Append-only log remains source of truth.
+- Schema v1: `ferrumq_topics`, `ferrumq_messages`, `ferrumq_projection_runs`.
+- Custom migration runner with runtime SQL files (no compile-time DB).
+- `msg-postgres` crate with async `sqlx` repository and offline projection
+  rebuild.
+- `brokerd postgres migrate` — run schema migrations.
+- `brokerd postgres rebuild` — offline rebuild from durable message log.
+- Database URL resolution: `--database-url` flag, then `FERRUMQ_DATABASE_URL`.
+- Repeatable rebuild:
+  `ON CONFLICT (topic, partition_id, message_offset) DO NOTHING`.
+- `message_id` uniqueness enforced: same ID at a different location → error.
+- Projection runs tracked in `ferrumq_projection_runs` (success/error).
+- Broker-state metadata is authoritative for partition counts; durable broker
+  and storage recovery rules validate source data.
+- Stable message-derived topic timestamps and first-insert-only empty-topic
+  timestamps.
+- Serialized transactional migrations with validated tracking metadata.
+- Schema constraints for ranges, hashes, statuses, and completion fields.
+- Repeatable rebuild, empty topics, segment-rolled logs, multiple partitions,
+  keyed records, deduplicated retries, and pre-idempotency messages.
+- Integration tests behind `FERRUMQ_POSTGRES_TEST_URL`.
+- Documentation: `docs/POSTGRES.md`, ADR 0018.
+- No broker correctness dependency on PostgreSQL.
+- `make ci` passes without a running database.
+- No new public gRPC or HTTP contracts.
+- No continuous projection worker (deferred).
+- No full-text search (deferred).
+- No file/blob storage (deferred).
+- No web dashboard (deferred).
+- No metrics added (offline admin command).
+- Sanitized connection, migration, query, source-data, and projection errors.
+
+Status: implemented.
+
+Deferred from Milestone 15:
+
+- Continuous projection daemon/worker.
+- Full-text search (`tsvector`, `pg_trgm`, `unaccent`).
+- File upload and blob store.
+- Web dashboard.
+- Authenticated/encrypted PostgreSQL connections.
+- Projection retention or cleanup.
+- New public gRPC or HTTP data-plane contracts.
