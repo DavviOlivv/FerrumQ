@@ -31,7 +31,12 @@ The Milestone 6 service is unary-only:
 - `Ack(AckRequest) -> AckResponse`.
 - `Nack(NackRequest) -> NackResponse`.
 
-Publish requests carry message metadata and opaque payload bytes. Empty optional strings mean absent optional metadata. `idempotency_key` is metadata-only in this version and does not trigger broker-side publish deduplication.
+Publish requests carry message metadata and opaque payload bytes. Empty optional
+strings mean absent optional metadata. As amended by Milestone 14,
+`idempotency_key` enables durable producer-side deduplication scoped by topic.
+Equivalent retries return the original publish identity with
+`PublishResponse.deduplicated = true`; conflicting reuse maps to
+`ALREADY_EXISTS` with the exact sanitized detail `idempotency key conflict`.
 
 Consume requests carry `lease_ms` and `now_unix_ms`. The broker command layer accepts an explicit per-request lease while preserving broker-config leases for older callers.
 
@@ -42,6 +47,8 @@ Consume requests carry `lease_ms` and `now_unix_ms`. The broker command layer ac
 - Unknown, duplicate, or stale delivery: `NOT_FOUND`.
 - Wrong consumer or invalid delivery ownership: `FAILED_PRECONDITION`.
 - Duplicate topic, if surfaced through broker APIs: `ALREADY_EXISTS`.
+- Idempotency key conflict during publish: `ALREADY_EXISTS` with sanitized
+  detail `idempotency key conflict`.
 - Poisoned or unavailable broker mutex: `UNAVAILABLE`.
 - Storage, corruption, serialization, and unexpected broker failures: `INTERNAL`.
 
@@ -49,6 +56,12 @@ Messages must be sanitized and must not include filesystem paths, Rust type name
 
 ## Consequences
 
-The data plane now has a versioned protobuf contract and an executable local gRPC adapter backed by durable broker state. Delivery remains local durable at-least-once, so consumers must be idempotent. This enables in-process tonic tests and future generated clients without duplicating broker semantics.
+The data plane now has a versioned protobuf contract and an executable local
+gRPC adapter backed by durable broker state. Delivery remains local durable
+at-least-once, so consumers must be idempotent. Publish deduplication is
+producer-side only, uses process-local mutex serialization, and does not add
+automatic client retries or exactly-once consumer processing. This enables
+in-process tonic tests and future generated clients without duplicating broker
+semantics.
 
 The adapter remains deliberately small. It does not implement streaming consume, TypeScript generated clients, auth/RBAC, TLS, rate limiting, observability export, dashboards, clustering, replication, exactly-once semantics, MaaS/multi-tenancy, or production daemon hardening.

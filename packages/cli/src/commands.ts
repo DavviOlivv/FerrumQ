@@ -49,6 +49,8 @@ import {
   validateTopic,
 } from "./validation.js";
 
+const IDEMPOTENCY_CONFLICT_DETAIL = "idempotency key conflict";
+
 export interface CommandDependencies {
   fetch?: FetchLike;
   controlClient?: ControlPlaneClient;
@@ -345,12 +347,15 @@ function wrapGrpcErrors(client: DataPlaneClient): DataPlaneClient {
           typeof (error as { code?: unknown }).code === "number"
             ? grpcStatusName((error as { code?: unknown }).code as number)
             : undefined;
-        if (statusName === "ALREADY_EXISTS") {
-          const details =
-            typeof (error as { details?: unknown }).details === "string"
-              ? (error as { details: string }).details
-              : "";
-          throw new ExpectedCliError(`IDEMPOTENCY_KEY_CONFLICT: ${details}`, 1);
+        const details = (error as { details?: unknown }).details;
+        if (
+          statusName === "ALREADY_EXISTS" &&
+          details === IDEMPOTENCY_CONFLICT_DETAIL
+        ) {
+          throw new ExpectedCliError(
+            `IDEMPOTENCY_KEY_CONFLICT: ${IDEMPOTENCY_CONFLICT_DETAIL}`,
+            1,
+          );
         }
         throw new ExpectedCliError(formatGrpcError(error));
       }

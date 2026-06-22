@@ -77,6 +77,10 @@ Complete but inconsistent state events, such as a duplicate recovered `topic_cre
 - Durability is local and flush-based; explicit fsync policy tuning is deferred.
 - There is no broker-state compaction.
 - There is no replication, clustering, or consensus.
+- Publish-idempotency checks are synchronized only within one broker process;
+  there is no cross-process or distributed lock.
+- Rebuilding the idempotency index requires a full retained-message-log scan,
+  and index memory grows without bound while unique keyed records are retained.
 - There is no exactly-once delivery. Publish idempotency via `idempotency_key`
   provides producer-side deduplication of equivalent retries, not consumer-side
   exactly-once processing.

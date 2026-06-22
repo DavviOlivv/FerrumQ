@@ -1,4 +1,6 @@
-use msg_core::{MessageEnvelope, MessageId, Offset, PartitionId, TopicName};
+use std::collections::BTreeMap;
+
+use msg_core::{IdempotencyKey, MessageEnvelope, MessageId, Offset, PartitionId, TopicName};
 use sha2::{Digest, Sha256};
 
 use crate::errors::BrokerError;
@@ -77,7 +79,10 @@ impl PublishFingerprint {
         }
 
         let headers = envelope.headers();
-        write_u64(&mut hasher, headers.len() as u64);
+        write_u64(
+            &mut hasher,
+            u64::try_from(headers.len()).expect("an addressable header count fits in u64"),
+        );
         for (name, value) in headers.iter() {
             write_str(&mut hasher, name.as_str());
             write_str(&mut hasher, value.as_str());
@@ -151,11 +156,50 @@ impl IdempotencyRecord {
     }
 }
 
+/// Result of checking a publish against the current topic-scoped index.
+pub(crate) enum IdempotencyCheck {
+    /// The envelope has no idempotency key and needs no index mutation.
+    Untracked,
+    /// This is the first observed publish for the key. Insert the supplied
+    /// key/fingerprint only after the message append succeeds.
+    New {
+        key: IdempotencyKey,
+        fingerprint: PublishFingerprint,
+    },
+    /// This is an equivalent retry. Return the stored identity without
+    /// selecting a partition or mutating broker state.
+    Replay(IdempotencyRecord),
+}
+
+/// Resolves topic-scoped idempotency before partition selection or mutation.
+///
+/// The caller remains responsible for checking that the topic exists first
+/// and for inserting a `New` record only after a successful append.
+pub(crate) fn check_idempotency(
+    topic: &TopicName,
+    envelope: &MessageEnvelope,
+    index: &BTreeMap<(TopicName, IdempotencyKey), IdempotencyRecord>,
+) -> Result<IdempotencyCheck, BrokerError> {
+    let Some(key) = envelope.idempotency_key().cloned() else {
+        return Ok(IdempotencyCheck::Untracked);
+    };
+
+    let fingerprint = PublishFingerprint::compute(topic, envelope);
+    match index.get(&(topic.clone(), key.clone())) {
+        None => Ok(IdempotencyCheck::New { key, fingerprint }),
+        Some(existing) if existing.fingerprint() == &fingerprint => {
+            Ok(IdempotencyCheck::Replay(existing.clone()))
+        }
+        Some(_) => Err(conflict_error(topic)),
+    }
+}
+
 /// Checks whether a publish with the given envelope is an equivalent retry of
 /// an existing idempotency record.
 ///
 /// Returns `true` if the fingerprints match (equivalent retry), `false` if
 /// they differ (the caller should raise a conflict error).
+#[cfg(test)]
 pub(crate) fn is_equivalent_retry(
     topic: &TopicName,
     envelope: &MessageEnvelope,
@@ -174,7 +218,7 @@ pub(crate) fn conflict_error(topic: &TopicName) -> BrokerError {
 }
 
 fn write_u64(hasher: &mut Sha256, value: u64) {
-    hasher.update(value.to_le_bytes());
+    hasher.update(encoded_u64(value));
 }
 
 fn write_str(hasher: &mut Sha256, value: &str) {
@@ -182,16 +226,24 @@ fn write_str(hasher: &mut Sha256, value: &str) {
 }
 
 fn write_bytes(hasher: &mut Sha256, value: &[u8]) {
-    write_u64(hasher, value.len() as u64);
+    write_u64(
+        hasher,
+        u64::try_from(value.len()).expect("an addressable byte slice length fits in u64"),
+    );
     hasher.update(value);
+}
+
+fn encoded_u64(value: u64) -> [u8; 8] {
+    value.to_le_bytes()
 }
 
 #[cfg(test)]
 mod tests {
     use msg_core::{
-        ContentType, EventSource, EventType, MessageEnvelope, MessageHeaders, MessageId,
-        MessagePayload, MessageTimestamp, PartitionKey,
+        ContentType, EventSource, EventType, HeaderName, HeaderValue, IdempotencyKey,
+        MessageEnvelope, MessageHeaders, MessageId, MessagePayload, MessageTimestamp, PartitionKey,
     };
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -297,28 +349,20 @@ mod tests {
 
     #[test]
     fn fingerprint_excludes_idempotency_key() {
-        let env_a = envelope(
-            "msg-1",
-            None,
-            b"hello",
-            "application/json",
-            "type",
-            "src",
-            None,
-        );
-        let env_b = envelope(
-            "msg-1",
-            None,
-            b"hello",
-            "application/json",
-            "type",
-            "src",
-            None,
-        );
-        // The fingerprint should not include idempotency_key, so even if we
-        // could set different keys, the fingerprints would match. Since we
-        // can't easily set it post-build, we just verify the fingerprint
-        // doesn't change when the envelope is identical.
+        let build = |key: &str| {
+            MessageEnvelope::builder(
+                MessageId::new("msg-1").unwrap(),
+                EventSource::new("src").unwrap(),
+                EventType::new("type").unwrap(),
+                ContentType::new("application/json").unwrap(),
+                MessageTimestamp::from_unix_millis(1_700_000_000_000),
+                MessagePayload::from_bytes(b"hello"),
+            )
+            .idempotency_key(IdempotencyKey::new(key).unwrap())
+            .build()
+        };
+        let env_a = build("idem-a");
+        let env_b = build("idem-b");
         assert_eq!(
             PublishFingerprint::compute(&topic(), &env_a),
             PublishFingerprint::compute(&topic(), &env_b)
@@ -559,6 +603,98 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_is_independent_of_header_insertion_order() {
+        let headers = |entries: &[(&str, &str)]| {
+            let mut headers = MessageHeaders::new();
+            for (name, value) in entries {
+                headers.insert(HeaderName::new(name).unwrap(), HeaderValue::new(*value));
+            }
+            headers
+        };
+        let build = |headers| {
+            MessageEnvelope::builder(
+                MessageId::new("msg-1").unwrap(),
+                EventSource::new("src").unwrap(),
+                EventType::new("type").unwrap(),
+                ContentType::new("application/json").unwrap(),
+                MessageTimestamp::from_unix_millis(1),
+                MessagePayload::from_bytes(b"hello"),
+            )
+            .headers(headers)
+            .build()
+        };
+
+        let first = build(headers(&[("z-last", "2"), ("a-first", "1")]));
+        let second = build(headers(&[("a-first", "1"), ("z-last", "2")]));
+
+        assert_eq!(
+            PublishFingerprint::compute(&topic(), &first),
+            PublishFingerprint::compute(&topic(), &second)
+        );
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_header_name_value_boundaries() {
+        let build = |name: &str, value: &str| {
+            MessageEnvelope::builder(
+                MessageId::new("msg-1").unwrap(),
+                EventSource::new("src").unwrap(),
+                EventType::new("type").unwrap(),
+                ContentType::new("application/json").unwrap(),
+                MessageTimestamp::from_unix_millis(1),
+                MessagePayload::from_bytes(b"hello"),
+            )
+            .header(HeaderName::new(name).unwrap(), HeaderValue::new(value))
+            .build()
+        };
+
+        assert_ne!(
+            PublishFingerprint::compute(&topic(), &build("ab", "c")),
+            PublishFingerprint::compute(&topic(), &build("a", "bc"))
+        );
+    }
+
+    #[test]
+    fn length_prefixes_prevent_cross_field_boundary_ambiguity() {
+        let first = envelope("msg-1", None, b"x", "ab", "c", "src", None);
+        let second = envelope("msg-1", None, b"x", "a", "bc", "src", None);
+
+        assert_ne!(
+            PublishFingerprint::compute(&topic(), &first),
+            PublishFingerprint::compute(&topic(), &second)
+        );
+    }
+
+    #[test]
+    fn canonical_lengths_are_fixed_width_little_endian() {
+        assert_eq!(
+            encoded_u64(0x0102_0304_0506_0708),
+            [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+    }
+
+    #[test]
+    fn representative_fingerprint_remains_compatible() {
+        let env = envelope(
+            "msg-1",
+            None,
+            b"hello",
+            "application/json",
+            "type",
+            "src",
+            None,
+        );
+
+        assert_eq!(
+            PublishFingerprint::compute(&topic(), &env).as_bytes(),
+            &[
+                206, 201, 187, 166, 115, 249, 229, 236, 123, 139, 191, 163, 22, 140, 131, 148, 70,
+                5, 6, 146, 91, 234, 6, 203, 97, 241, 244, 249, 10, 23, 138, 24,
+            ]
+        );
+    }
+
+    #[test]
     fn fingerprint_distinguishes_different_topics() {
         let env = envelope(
             "msg-1",
@@ -724,5 +860,94 @@ mod tests {
         assert_eq!(existing.message_id().as_str(), "msg-original");
         assert_eq!(existing.partition_id(), PartitionId::new(2));
         assert_eq!(existing.offset(), Offset::new(7));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn fingerprint_is_deterministic_for_bounded_binary_messages(
+            payload in proptest::collection::vec(any::<u8>(), 0..512),
+            partition_key in proptest::option::of("[a-z0-9]{1,16}"),
+            subject in proptest::option::of("[a-z0-9/]{1,16}"),
+        ) {
+            let env = envelope(
+                "msg-1",
+                partition_key.as_deref(),
+                &payload,
+                "application/octet-stream",
+                "test.event",
+                "property-test",
+                subject.as_deref(),
+            );
+
+            prop_assert_eq!(
+                PublishFingerprint::compute(&topic(), &env),
+                PublishFingerprint::compute(&topic(), &env)
+            );
+        }
+
+        #[test]
+        fn different_payload_bytes_change_the_fingerprint(
+            prefix in proptest::collection::vec(any::<u8>(), 0..256),
+            left in any::<u8>(),
+            right in any::<u8>(),
+        ) {
+            prop_assume!(left != right);
+            let mut payload_a = prefix.clone();
+            payload_a.push(left);
+            let mut payload_b = prefix;
+            payload_b.push(right);
+            let env_a = envelope("msg-a", None, &payload_a, "application/octet-stream", "type", "src", None);
+            let env_b = envelope("msg-b", None, &payload_b, "application/octet-stream", "type", "src", None);
+
+            prop_assert_ne!(
+                PublishFingerprint::compute(&topic(), &env_a),
+                PublishFingerprint::compute(&topic(), &env_b)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark-style diagnostic; run explicitly"]
+    fn benchmark_fingerprint_cost_by_payload_size() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        for payload_size in [0, 64, 1_024, 64 * 1_024] {
+            let payload = vec![0x5a; payload_size];
+            let env = envelope(
+                "msg-1",
+                Some("partition-key"),
+                &payload,
+                "application/octet-stream",
+                "benchmark.event",
+                "benchmark",
+                Some("subject"),
+            );
+            let started = Instant::now();
+            for _ in 0..1_000 {
+                black_box(PublishFingerprint::compute(&topic(), black_box(&env)));
+            }
+            eprintln!(
+                "fingerprint payload_bytes={payload_size} iterations=1000 elapsed={:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "structural lower-bound diagnostic; run explicitly"]
+    fn report_structural_memory_lower_bound_per_indexed_key() {
+        use std::mem::size_of;
+
+        let structural_bytes = size_of::<(TopicName, IdempotencyKey)>()
+            + size_of::<IdempotencyRecord>()
+            + 4 * size_of::<usize>();
+        eprintln!(
+            "estimated structural lower bound per indexed key: {structural_bytes} bytes; \
+             excludes BTreeMap allocator overhead, String heap capacities, and allocator metadata"
+        );
+        assert!(structural_bytes >= 32);
     }
 }

@@ -1,3 +1,5 @@
+use std::fs;
+
 use msg_broker::{BrokerConfig, CreateTopicCommand, DlqQuery, DurableBroker, DurableBrokerConfig};
 use msg_core::{DeadLetterReason, RetryPolicy, TopicConfig, TopicName};
 use msg_data_plane::DataPlaneService;
@@ -336,6 +338,183 @@ async fn data_plane_metrics_omit_payload_idempotency_and_delivery_identifiers() 
     assert!(!output.contains("topic=\"orders\""));
     assert!(!output.contains("delivery_id="));
     assert!(!output.contains("consumer_id="));
+}
+
+#[tokio::test]
+#[ignore = "global process metrics require isolated execution"]
+async fn exact_idempotency_metric_deltas_cover_append_duplicate_conflict_failure_and_recovery() {
+    metrics::reset_for_tests();
+    let root = TempDir::new().unwrap();
+    let mut broker = DurableBroker::open(DurableBrokerConfig::new(
+        root.path(),
+        broker_config(3, Some(1_000)),
+        1,
+    ))
+    .unwrap();
+    create_topic(&mut broker);
+    let service = DataPlaneService::new(broker);
+
+    let value = |name, labels| metrics::counter_value(name, labels);
+    let rpc_ok_before = value(
+        metric_names::DATA_RPC_REQUESTS_TOTAL,
+        &[("method", "Publish"), ("status", "ok")],
+    );
+    let data_success_before = value(metric_names::DATA_PUBLISHES_TOTAL, &[("status", "success")]);
+    let broker_success_before = value(
+        metric_names::BROKER_MESSAGES_PUBLISHED_TOTAL,
+        &[("status", "success")],
+    );
+    let storage_success_before = value(
+        metric_names::STORAGE_APPENDS_TOTAL,
+        &[("status", "success")],
+    );
+    let deduplicated_before = value(metric_names::BROKER_PUBLISH_DEDUPLICATED_TOTAL, &[]);
+    let conflicts_before = value(
+        metric_names::BROKER_PUBLISH_IDEMPOTENCY_CONFLICTS_TOTAL,
+        &[],
+    );
+
+    let mut first = publish_request("message-original");
+    first.idempotency_key = "idem-exact".to_owned();
+    let original = publish_response(&service, first).await;
+    assert!(!original.deduplicated);
+
+    let mut duplicate = publish_request("message-retry");
+    duplicate.idempotency_key = "idem-exact".to_owned();
+    let duplicate = publish_response(&service, duplicate).await;
+    assert!(duplicate.deduplicated);
+
+    assert_eq!(
+        value(
+            metric_names::DATA_RPC_REQUESTS_TOTAL,
+            &[("method", "Publish"), ("status", "ok")]
+        ),
+        rpc_ok_before + 2
+    );
+    assert_eq!(
+        value(metric_names::DATA_PUBLISHES_TOTAL, &[("status", "success")]),
+        data_success_before + 2
+    );
+    assert_eq!(
+        value(
+            metric_names::BROKER_MESSAGES_PUBLISHED_TOTAL,
+            &[("status", "success")]
+        ),
+        broker_success_before + 1
+    );
+    assert_eq!(
+        value(
+            metric_names::STORAGE_APPENDS_TOTAL,
+            &[("status", "success")]
+        ),
+        storage_success_before + 1
+    );
+    assert_eq!(
+        value(metric_names::BROKER_PUBLISH_DEDUPLICATED_TOTAL, &[]),
+        deduplicated_before + 1
+    );
+
+    let mut conflict = publish_request("message-conflict");
+    conflict.idempotency_key = "idem-exact".to_owned();
+    conflict.payload = b"different".to_vec();
+    assert_status(
+        service.publish(Request::new(conflict)).await,
+        Code::AlreadyExists,
+        "idempotency key conflict",
+    );
+    assert_eq!(
+        value(
+            metric_names::DATA_RPC_REQUESTS_TOTAL,
+            &[("method", "Publish"), ("status", "already_exists")]
+        ),
+        1
+    );
+    assert_eq!(
+        value(
+            metric_names::DATA_RPC_ERRORS_TOTAL,
+            &[("method", "Publish"), ("code", "already_exists")]
+        ),
+        1
+    );
+    assert_eq!(
+        value(
+            metric_names::BROKER_PUBLISH_IDEMPOTENCY_CONFLICTS_TOTAL,
+            &[]
+        ),
+        conflicts_before + 1
+    );
+
+    let blocker = root
+        .path()
+        .join("messages/topics/orders/partitions/0/00000000000000000001.log");
+    fs::create_dir(&blocker).unwrap();
+    let mut failed = publish_request("message-after-failure");
+    failed.idempotency_key = "idem-after-failure".to_owned();
+    assert_status(
+        service.publish(Request::new(failed.clone())).await,
+        Code::Internal,
+        "internal broker error",
+    );
+    assert_eq!(
+        value(
+            metric_names::BROKER_MESSAGES_PUBLISHED_TOTAL,
+            &[("status", "error")]
+        ),
+        1
+    );
+    assert_eq!(
+        value(metric_names::STORAGE_APPENDS_TOTAL, &[("status", "error")]),
+        1
+    );
+    assert_eq!(
+        value(
+            metric_names::DATA_RPC_REQUESTS_TOTAL,
+            &[("method", "Publish"), ("status", "internal")]
+        ),
+        1
+    );
+
+    fs::remove_dir(&blocker).unwrap();
+    let committed = publish_response(&service, failed).await;
+    assert!(!committed.deduplicated);
+    assert_eq!(committed.offset, 1);
+    let mut retry = publish_request("message-after-failure-retry");
+    retry.idempotency_key = "idem-after-failure".to_owned();
+    assert!(publish_response(&service, retry).await.deduplicated);
+
+    let open_before = value(metric_names::BROKER_OPENS_TOTAL, &[("status", "success")]);
+    let recovery_before = value(
+        metric_names::BROKER_RECOVERIES_TOTAL,
+        &[("status", "success")],
+    );
+    drop(service);
+    let reopened = DataPlaneService::new(
+        DurableBroker::open(DurableBrokerConfig::new(
+            root.path(),
+            broker_config(3, Some(1_000)),
+            1,
+        ))
+        .unwrap(),
+    );
+    assert_eq!(
+        value(metric_names::BROKER_OPENS_TOTAL, &[("status", "success")]),
+        open_before + 1
+    );
+    assert_eq!(
+        value(
+            metric_names::BROKER_RECOVERIES_TOTAL,
+            &[("status", "success")]
+        ),
+        recovery_before + 1
+    );
+
+    let mut recovered_retry = publish_request("message-recovered-retry");
+    recovered_retry.idempotency_key = "idem-exact".to_owned();
+    assert!(
+        publish_response(&reopened, recovered_retry)
+            .await
+            .deduplicated
+    );
 }
 
 #[tokio::test]

@@ -67,7 +67,8 @@ and development runtime because HTTP topic creation, gRPC
 publish/consume/ACK/NACK, HTTP status/DLQ, and HTTP `/metrics` observe one live
 process-local state. `brokerd serve` and `brokerd serve-grpc` remain
 split-process modes with startup-loaded state and separate process-local
-metrics.
+metrics; they do not provide cross-process mutation locking and are not a
+coordinated concurrent-write runtime for one data directory.
 
 Planned dependency direction:
 
@@ -87,7 +88,7 @@ The control plane manages topics, partitions, consumer groups, DLQ inspection, h
 
 Milestone 5 implements the first control-plane adapter with Axum and local durable backing state. It uses explicit JSON DTOs and a stable error envelope, including `409 Conflict` for duplicate topic creation, `404` for valid unknown topics, `503` when broker state is unavailable, and JSON-envelope responses for unknown routes or unsupported methods.
 
-Milestone 6 implements the first data-plane adapter with tonic/prost and the local durable broker. The gRPC service exposes unary `Publish`, `Consume`, `Ack`, and `Nack` calls. Delivery remains local durable at-least-once and `idempotency_key` is metadata-only, so consumers must be idempotent and producers do not get deduplication guarantees yet. It maps validation failures to `INVALID_ARGUMENT`, unknown topics and stale deliveries to `NOT_FOUND`, invalid delivery ownership to `FAILED_PRECONDITION`, duplicate topics to `ALREADY_EXISTS` if surfaced through broker APIs, unavailable broker state to `UNAVAILABLE`, and storage/corruption/unexpected failures to sanitized `INTERNAL` statuses.
+Milestone 6 implements the first data-plane adapter with tonic/prost and the local durable broker. The gRPC service exposes unary `Publish`, `Consume`, `Ack`, and `Nack` calls. Milestone 14 makes a non-empty `idempotency_key` enforce topic-scoped durable producer deduplication while delivery remains local durable at-least-once and consumers must remain idempotent. It maps validation failures to `INVALID_ARGUMENT`, unknown topics and stale deliveries to `NOT_FOUND`, invalid delivery ownership to `FAILED_PRECONDITION`, idempotency conflicts and duplicate topics to `ALREADY_EXISTS`, unavailable broker state to `UNAVAILABLE`, and storage/corruption/unexpected failures to sanitized `INTERNAL` statuses.
 
 Milestone 7 exposes both planes through `ferrumq`: health, readiness, status, topic, and DLQ commands use HTTP; publish, consume, ACK, and NACK commands use unary gRPC. Help and version commands are local. JSON CLI output wraps each command family in stable top-level keys and represents gRPC `uint64` values as decimal strings; expected errors remain short human text on stderr.
 

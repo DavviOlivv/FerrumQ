@@ -626,6 +626,28 @@ describe("validation and expected failures", () => {
     expect(result.stdout).toEqual([]);
   });
 
+  it("preserves unrelated ALREADY_EXISTS publish errors", async () => {
+    const dataPlaneClient: DataPlaneClient = {
+      async publish() {
+        throw { code: 6, details: "topic already exists" };
+      },
+      consume: unreachableDataPlaneClient().consume,
+      ack: unreachableDataPlaneClient().ack,
+      nack: unreachableDataPlaneClient().nack,
+      close: unreachableDataPlaneClient().close,
+    };
+
+    const result = await captureRun(["publish", "orders", "--data", "hello"], {
+      dataPlaneClient,
+    });
+
+    expect(result).toEqual({
+      code: 1,
+      stdout: [],
+      stderr: ["gRPC ALREADY_EXISTS (6): topic already exists"],
+    });
+  });
+
   it("shows deduplicated indicator for human output", async () => {
     const dataPlaneClient = stubDataPlaneClient({ deduplicated: true });
 

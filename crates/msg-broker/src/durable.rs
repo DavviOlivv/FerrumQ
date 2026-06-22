@@ -26,7 +26,7 @@ use crate::{
         add_millis, advance_round_robin_partition, deterministic_delivery_id, keyed_partition,
         round_robin_partition,
     },
-    idempotency::{IdempotencyRecord, PublishFingerprint, conflict_error, is_equivalent_retry},
+    idempotency::{IdempotencyCheck, IdempotencyRecord, PublishFingerprint, check_idempotency},
     state::{GroupPartitionState, GroupState, MessageRef, PendingDelivery, RetryEntry},
 };
 
@@ -139,9 +139,16 @@ pub enum DurableBrokerError {
 /// - Complete malformed broker-state log lines are fatal
 ///   [`DurableBrokerError::StateCorruption`] errors. A final incomplete state
 ///   line without a trailing newline is truncated and ignored during recovery.
+/// - Publish idempotency is scoped by `(topic, idempotency_key)`. The message
+///   log is the durable source of truth; reopen scans all retained message
+///   records to rebuild an in-memory index whose size grows with retained
+///   unique keys.
+/// - Synchronization is process-local. Callers sharing one broker instance
+///   must serialize mutation, as the bundled adapters do with a mutex.
 ///
-/// This is not exactly-once delivery, deduplication enforcement, replication,
-/// compaction, or an fsync-tuned storage policy. Consumers must be idempotent.
+/// This does not provide exactly-once delivery, automatic producer retries,
+/// cross-process or distributed coordination, replication, compaction, or an
+/// fsync-tuned storage policy. Consumers must remain idempotent.
 #[derive(Debug)]
 pub struct DurableBroker {
     config: DurableBrokerConfig,
@@ -272,9 +279,10 @@ impl DurableBroker {
     /// Opens or creates a durable broker rooted at `config.root_dir`.
     ///
     /// Recovery replays `<root>/broker-state/events.jsonl`, opens the message
-    /// logs under `<root>/messages`, reconstructs round-robin partition
-    /// selection, and releases recovered pending deliveries for at-least-once
-    /// redelivery. Complete malformed state lines fail open with
+    /// logs under `<root>/messages`, scans all retained message records to
+    /// reconstruct round-robin and publish-idempotency state, and releases
+    /// recovered pending deliveries for at-least-once redelivery. Complete
+    /// malformed state lines fail open with
     /// [`DurableBrokerError::StateCorruption`]; one final incomplete line is
     /// truncated and ignored.
     pub fn open(config: DurableBrokerConfig) -> DurableBrokerResult<Self> {
@@ -302,8 +310,7 @@ impl DurableBroker {
             for event in events {
                 broker.apply_recovered_event(event)?;
             }
-            broker.recover_round_robin_state()?;
-            broker.recover_idempotency_state()?;
+            broker.recover_publish_state()?;
             broker.release_recovered_pending();
 
             info!(
@@ -441,40 +448,24 @@ impl DurableBroker {
         let result = (|| {
             let (topic_name, envelope) = command.into_parts();
 
-            // Idempotency check: if the envelope carries an idempotency key,
-            // look up the existing record BEFORE selecting a partition or
-            // advancing round-robin state. A duplicate retry must not alter
-            // future partition assignment or append another message.
-            let idempotency_key = envelope.idempotency_key().cloned();
-            if let Some(key) = &idempotency_key {
-                let lookup_key = (topic_name.clone(), key.clone());
-                if let Some(existing) = self.idempotency_index.get(&lookup_key) {
-                    if is_equivalent_retry(&topic_name, &envelope, existing) {
-                        // Equivalent retry — return the original identity
-                        // without appending or advancing round-robin.
-                        return Ok(PublishedMessage::replay(
-                            topic_name,
-                            existing.partition_id(),
-                            existing.offset(),
-                            existing.message_id().clone(),
-                        ));
-                    }
-                    // Conflicting reuse — reject without appending.
-                    return Err(conflict_error(&topic_name).into());
-                }
+            if !self.topics.contains_key(&topic_name) {
+                return Err(BrokerError::TopicNotFound { topic: topic_name }.into());
             }
 
-            // No existing record — proceed with normal append.
-            let fingerprint = idempotency_key
-                .as_ref()
-                .map(|_| PublishFingerprint::compute(&topic_name, &envelope));
+            let idempotency = check_idempotency(&topic_name, &envelope, &self.idempotency_index)?;
+            if let IdempotencyCheck::Replay(existing) = &idempotency {
+                return Ok(PublishedMessage::replay(
+                    topic_name,
+                    existing.partition_id(),
+                    existing.offset(),
+                    existing.message_id().clone(),
+                ));
+            }
 
-            let durable_topic =
-                self.topics
-                    .get_mut(&topic_name)
-                    .ok_or_else(|| BrokerError::TopicNotFound {
-                        topic: topic_name.clone(),
-                    })?;
+            let durable_topic = self
+                .topics
+                .get_mut(&topic_name)
+                .expect("topic existence is checked before idempotency resolution");
 
             let should_advance_round_robin = envelope.partition_key().is_none();
             let partition_id = select_durable_partition(durable_topic, &envelope);
@@ -493,11 +484,11 @@ impl DurableBroker {
 
             // Register the idempotency record only after the append succeeds,
             // so a failed append does not reserve the key.
-            if let (Some(key), Some(fp)) = (idempotency_key, fingerprint) {
+            if let IdempotencyCheck::New { key, fingerprint } = idempotency {
                 self.idempotency_index.insert(
                     (topic_name, key),
                     IdempotencyRecord::new(
-                        fp,
+                        fingerprint,
                         partition_id,
                         offset,
                         published.message_id().clone(),
@@ -1537,29 +1528,7 @@ impl DurableBroker {
         Ok(())
     }
 
-    fn recover_round_robin_state(&mut self) -> DurableBrokerResult<()> {
-        for durable_topic in self.topics.values_mut() {
-            let mut unkeyed_message_count = 0_u64;
-            for partition_id in durable_topic.partition_ids().collect::<Vec<_>>() {
-                let partition_log = durable_topic
-                    .partition_log(partition_id)
-                    .expect("durable topic logs are opened from Topic partition ids");
-                let records = read_all_records(partition_log)?;
-                unkeyed_message_count += records
-                    .iter()
-                    .filter(|record| record.envelope.partition_key().is_none())
-                    .count() as u64;
-            }
-
-            durable_topic.set_next_round_robin_partition(
-                (unkeyed_message_count % u64::from(durable_topic.partition_count())) as u32,
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Rebuilds the in-memory idempotency index from durable stored messages.
+    /// Rebuilds round-robin and idempotency state in one retained-log scan.
     ///
     /// The message log is the single source of truth — no auxiliary index is
     /// trusted. Records are scanned in deterministic canonical order: topic
@@ -1577,14 +1546,26 @@ impl DurableBroker {
     /// Existing data may contain repeated idempotency keys because the field
     /// was previously metadata-only. This recovery does not repair or rewrite
     /// existing data.
-    fn recover_idempotency_state(&mut self) -> DurableBrokerResult<()> {
-        for (topic_name, durable_topic) in &self.topics {
+    fn recover_publish_state(&mut self) -> DurableBrokerResult<()> {
+        let mut recovered_idempotency_index = BTreeMap::new();
+
+        for (topic_name, durable_topic) in &mut self.topics {
+            let mut unkeyed_message_count = 0_u64;
             for partition_id in durable_topic.partition_ids().collect::<Vec<_>>() {
                 let partition_log = durable_topic
                     .partition_log(partition_id)
                     .expect("durable topic logs are opened from Topic partition ids");
                 let records = read_all_records(partition_log)?;
                 for record in records {
+                    if record.envelope.partition_key().is_none() {
+                        unkeyed_message_count =
+                            unkeyed_message_count.checked_add(1).ok_or_else(|| {
+                                corruption(
+                                    "unkeyed message count overflow during recovery".to_owned(),
+                                )
+                            })?;
+                    }
+
                     let Some(key) = record.envelope.idempotency_key() else {
                         continue;
                     };
@@ -1596,9 +1577,9 @@ impl DurableBroker {
                         record.offset,
                         record.envelope.id().clone(),
                     );
-                    match self.idempotency_index.get(&lookup_key) {
+                    match recovered_idempotency_index.get(&lookup_key) {
                         None => {
-                            self.idempotency_index.insert(lookup_key, new_record);
+                            recovered_idempotency_index.insert(lookup_key, new_record);
                         }
                         Some(existing) => {
                             if existing.fingerprint() == new_record.fingerprint() {
@@ -1622,7 +1603,15 @@ impl DurableBroker {
                     }
                 }
             }
+
+            let next_partition = unkeyed_message_count % u64::from(durable_topic.partition_count());
+            durable_topic.set_next_round_robin_partition(
+                u32::try_from(next_partition)
+                    .expect("round-robin remainder is less than the u32 partition count"),
+            );
         }
+
+        self.idempotency_index = recovered_idempotency_index;
         Ok(())
     }
 

@@ -103,6 +103,14 @@ Idempotency records live for the lifetime of retained local broker data. No
 TTL, no bounded expiration window, no cleanup API, no compaction, no deletion
 worker. Disk and memory growth are honest and documented.
 
+### Synchronization and retries
+
+Publish checks and mutations are serialized only by the process-local broker
+mutex used by the local adapters. Separate processes do not share an
+idempotency index or distributed lock and must not concurrently mutate one data
+directory. Clients do not retry automatically; callers choose whether and when
+to retry with the same key and equivalent intent.
+
 ### Not exactly-once
 
 This is producer-side publish deduplication, not exactly-once delivery.
@@ -126,8 +134,8 @@ already-delivered messages.
 ### Negative
 
 - Idempotency index grows unboundedly with the number of unique idempotency
-  keys. For a local broker this is acceptable; production deployments would
-  need a retention policy.
+  keys in retained data. For a local broker this is acceptable; production
+  deployments would need a retention policy.
 - Recovery scans all message records to rebuild the index, adding startup cost
   proportional to the data set. Round-robin recovery already performs a full
   scan, so the additional cost is limited to building the in-memory map.

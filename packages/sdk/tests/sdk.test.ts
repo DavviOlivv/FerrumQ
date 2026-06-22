@@ -812,6 +812,37 @@ describe("FerrumQClient publish idempotency", () => {
     client.close();
   });
 
+  it("preserves unrelated ALREADY_EXISTS errors during publish", async () => {
+    const client = new FerrumQClient({
+      httpUrl: "http://127.0.0.1:8080",
+      grpcUrl: "http://127.0.0.1:9090",
+      grpcClientOptions: {
+        protoPath: "/tmp/dataplane.proto",
+        createRawClient() {
+          return {
+            close: vi.fn(),
+            publish(
+              _request: unknown,
+              _options: unknown,
+              callback: (error: unknown, _response: unknown) => void,
+            ) {
+              callback({ code: 6, details: "topic already exists" }, undefined);
+            },
+          };
+        },
+      },
+    });
+
+    await expect(
+      client.publish({ topic: "orders", payload: "hello" }),
+    ).rejects.toMatchObject({
+      code: "ALREADY_EXISTS",
+      grpcStatus: "ALREADY_EXISTS",
+      operation: "publish",
+    });
+    client.close();
+  });
+
   it("preserves ALREADY_EXISTS code for non-publish operations", async () => {
     const client = new FerrumQClient({
       httpUrl: "http://127.0.0.1:8080",

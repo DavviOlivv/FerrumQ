@@ -98,6 +98,8 @@ with the same key and equivalent content returns the original publish result
 without appending another message. Conflicting reuse (same key, different
 content) fails with `IDEMPOTENCY_KEY_CONFLICT`. `--data` must be non-empty. Topic names, consumer groups, bounded identifiers, partition counts,
 consume limits, and lease values are validated before requests are sent.
+The CLI does not retry publishes automatically; callers must reuse the same key
+and equivalent intent when retrying an ambiguous publish.
 
 ## Output
 

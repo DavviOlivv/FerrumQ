@@ -1,6 +1,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
+use std::thread;
 
 use msg_broker::{
     AckCommand, BrokerConfig, BrokerError, ConsumeCommand, CreateTopicCommand, DlqQuery,
@@ -11,6 +13,7 @@ use msg_core::{
     IdempotencyKey, MessageId, MessagePayload, MessageTimestamp, Offset, PartitionId, PartitionKey,
     RetryPolicy, TopicConfig, TopicName,
 };
+use proptest::prelude::*;
 use tempfile::TempDir;
 
 fn timestamp(value: u64) -> MessageTimestamp {
@@ -900,6 +903,61 @@ fn failed_message_append_returns_error_without_phantom_message() {
 }
 
 #[test]
+fn failed_idempotent_append_preserves_offset_round_robin_index_and_key_usability() {
+    let root = TempDir::new().unwrap();
+    let mut broker = open_broker(&root, 3, Some(100), 1_000, 1);
+    create_topic(&mut broker, 3);
+
+    let first = publish(&mut broker, "message-0");
+    assert_eq!(first.partition_id(), PartitionId::new(0));
+    assert_eq!(first.offset(), Offset::new(0));
+
+    let blocker = segment_path(root.path(), 1, 0);
+    fs::create_dir(&blocker).unwrap();
+    let error = broker
+        .publish(PublishCommand::new(
+            topic_name(),
+            idempotent_envelope("message-failed", "idem-reusable", b"payload"),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DurableBrokerError::Storage(msg_storage::StorageError::Io(_))
+    ));
+
+    fs::remove_dir(&blocker).unwrap();
+    let committed = publish_idempotent(
+        &mut broker,
+        "message-committed",
+        "idem-reusable",
+        b"payload",
+    );
+    assert!(!committed.deduplicated());
+    assert_eq!(committed.partition_id(), PartitionId::new(1));
+    assert_eq!(committed.offset(), Offset::new(0));
+
+    let retry = publish_idempotent(&mut broker, "message-retry", "idem-reusable", b"payload");
+    assert!(retry.deduplicated());
+    assert_eq!(retry.message_id().as_str(), "message-committed");
+
+    let next = publish(&mut broker, "message-next");
+    assert_eq!(next.partition_id(), PartitionId::new(2));
+    assert_eq!(next.offset(), Offset::new(0));
+
+    drop(broker);
+    let mut reopened = open_broker(&root, 3, Some(100), 1_000, 1);
+    let recovered_retry = publish_idempotent(
+        &mut reopened,
+        "message-after-reopen",
+        "idem-reusable",
+        b"payload",
+    );
+    assert!(recovered_retry.deduplicated());
+    assert_eq!(recovered_retry.message_id().as_str(), "message-committed");
+    assert_eq!(consume(&mut reopened, 10, 10).len(), 3);
+}
+
+#[test]
 fn segment_recovery_consumes_all_messages_in_deterministic_order() {
     let root = TempDir::new().unwrap();
     {
@@ -1075,6 +1133,28 @@ fn idempotent_first_publish_is_not_deduplicated() {
 }
 
 #[test]
+fn unknown_topic_validation_precedes_durable_idempotency_mutation() {
+    let root = TempDir::new().unwrap();
+    let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+    let error = broker
+        .publish(PublishCommand::new(
+            topic_name(),
+            idempotent_envelope("msg-failed", "idem-reusable", b"payload"),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DurableBrokerError::Broker(BrokerError::TopicNotFound { .. })
+    ));
+
+    create_topic(&mut broker, 2);
+    let committed = publish_idempotent(&mut broker, "msg-committed", "idem-reusable", b"payload");
+    assert!(!committed.deduplicated());
+    assert_eq!(committed.partition_id(), PartitionId::new(0));
+    assert_eq!(committed.offset(), Offset::new(0));
+}
+
+#[test]
 fn equivalent_retry_returns_original_identity_and_is_deduplicated() {
     let root = TempDir::new().unwrap();
     let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
@@ -1154,6 +1234,42 @@ fn equivalent_retry_after_reopen_returns_original_identity() {
     assert_eq!(retry.partition_id(), first.partition_id());
     assert_eq!(retry.offset(), first.offset());
     assert_eq!(retry.message_id(), first.message_id());
+}
+
+#[test]
+fn crash_after_message_append_before_index_mutation_recovers_idempotency() {
+    let root = TempDir::new().unwrap();
+    {
+        let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+        create_topic(&mut broker, 1);
+    }
+
+    let mut log = msg_storage::PartitionLog::open(
+        msg_storage::LogConfig {
+            root_dir: root.path().join("messages"),
+            max_segment_bytes: 1024 * 1024,
+        },
+        &topic_name(),
+        PartitionId::new(0),
+    )
+    .unwrap();
+    assert_eq!(
+        log.append(idempotent_envelope(
+            "msg-before-crash",
+            "idem-crash",
+            b"payload"
+        ))
+        .unwrap(),
+        Offset::new(0)
+    );
+    drop(log);
+
+    let mut reopened = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+    let retry = publish_idempotent(&mut reopened, "msg-after-crash", "idem-crash", b"payload");
+    assert!(retry.deduplicated());
+    assert_eq!(retry.offset(), Offset::new(0));
+    assert_eq!(retry.message_id().as_str(), "msg-before-crash");
+    assert_eq!(consume(&mut reopened, 10, 10).len(), 1);
 }
 
 #[test]
@@ -1376,6 +1492,40 @@ fn historical_equivalent_duplicates_recover_earliest_as_canonical() {
 }
 
 #[test]
+fn historical_equivalent_duplicates_use_canonical_partition_then_offset_order() {
+    let root = TempDir::new().unwrap();
+    {
+        let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+        create_topic(&mut broker, 3);
+    }
+
+    for (partition, message_id) in [(2, "msg-physically-first"), (0, "msg-canonical")] {
+        let mut log = msg_storage::PartitionLog::open(
+            msg_storage::LogConfig {
+                root_dir: root.path().join("messages"),
+                max_segment_bytes: 1024 * 1024,
+            },
+            &topic_name(),
+            PartitionId::new(partition),
+        )
+        .unwrap();
+        log.append(idempotent_envelope(
+            message_id,
+            "idem-canonical",
+            b"same-intent",
+        ))
+        .unwrap();
+    }
+
+    let mut reopened = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+    let retry = publish_idempotent(&mut reopened, "msg-retry", "idem-canonical", b"same-intent");
+    assert!(retry.deduplicated());
+    assert_eq!(retry.partition_id(), PartitionId::new(0));
+    assert_eq!(retry.offset(), Offset::new(0));
+    assert_eq!(retry.message_id().as_str(), "msg-canonical");
+}
+
+#[test]
 fn historical_conflicting_duplicates_fail_open_with_corruption() {
     let root = TempDir::new().unwrap();
     {
@@ -1416,20 +1566,212 @@ fn historical_conflicting_duplicates_fail_open_with_corruption() {
 }
 
 #[test]
-fn concurrent_idempotent_publishes_through_mutex_are_serialized() {
+fn repaired_final_keyed_record_does_not_reserve_its_idempotency_key() {
+    let root = TempDir::new().unwrap();
+    {
+        let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+        create_topic(&mut broker, 1);
+        publish_idempotent(&mut broker, "msg-damaged", "idem-repair", b"payload");
+    }
+
+    let segment = segment_path(root.path(), 0, 0);
+    flip_checksum_byte(&segment, frame_starts(&segment)[0]);
+
+    let mut reopened = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+    let replacement =
+        publish_idempotent(&mut reopened, "msg-replacement", "idem-repair", b"payload");
+    assert!(!replacement.deduplicated());
+    assert_eq!(replacement.offset(), Offset::new(0));
+    assert_eq!(replacement.message_id().as_str(), "msg-replacement");
+}
+
+#[test]
+fn middle_keyed_record_corruption_prevents_idempotency_recovery() {
+    let root = TempDir::new().unwrap();
+    {
+        let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+        create_topic(&mut broker, 1);
+        publish_idempotent(&mut broker, "msg-1", "idem-1", b"payload-1");
+        publish_idempotent(&mut broker, "msg-2", "idem-2", b"payload-2");
+    }
+
+    let segment = segment_path(root.path(), 0, 0);
+    let starts = frame_starts(&segment);
+    assert_eq!(starts.len(), 2);
+    flip_checksum_byte(&segment, starts[0]);
+
+    let error =
+        DurableBroker::open(durable_config(&root, 3, Some(100), 1_000, 1024 * 1024)).unwrap_err();
+    assert!(matches!(error, DurableBrokerError::Storage(_)));
+}
+
+#[test]
+fn pre_idempotency_unkeyed_history_reopens_and_accepts_new_keys() {
+    let root = TempDir::new().unwrap();
+    {
+        let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+        create_topic(&mut broker, 2);
+        publish(&mut broker, "legacy-0");
+        publish(&mut broker, "legacy-1");
+    }
+
+    let mut reopened = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+    let first = publish_idempotent(&mut reopened, "msg-new", "idem-new", b"new");
+    let retry = publish_idempotent(&mut reopened, "msg-retry", "idem-new", b"new");
+    assert!(!first.deduplicated());
+    assert!(retry.deduplicated());
+    assert_eq!(retry.message_id(), first.message_id());
+    assert_eq!(consume(&mut reopened, 10, 10).len(), 3);
+}
+
+#[test]
+fn concurrent_equivalent_publishes_through_mutex_commit_once() {
     let root = TempDir::new().unwrap();
     let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
     create_topic(&mut broker, 1);
+    let broker = Arc::new(Mutex::new(broker));
+    let barrier = Arc::new(Barrier::new(3));
+    let (sender, receiver) = mpsc::channel();
+    let mut workers = Vec::new();
 
-    // Two concurrent publish attempts with the same key — the broker is
-    // synchronized by &mut self, so only one can run at a time. The first
-    // succeeds, the second is deduplicated.
-    let first = publish_idempotent(&mut broker, "msg-1", "idem-1", br#"{"ok":true}"#);
-    let second = publish_idempotent(&mut broker, "msg-2", "idem-1", br#"{"ok":true}"#);
+    for message_id in ["msg-1", "msg-2"] {
+        let broker = Arc::clone(&broker);
+        let barrier = Arc::clone(&barrier);
+        let sender = sender.clone();
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            let result = broker.lock().unwrap().publish(PublishCommand::new(
+                topic_name(),
+                idempotent_envelope(message_id, "idem-1", br#"{"ok":true}"#),
+            ));
+            sender.send(result).unwrap();
+        }));
+    }
+    barrier.wait();
+    drop(sender);
+    for worker in workers {
+        worker.join().unwrap();
+    }
 
-    assert!(!first.deduplicated());
-    assert!(second.deduplicated());
-    assert_eq!(first.offset(), second.offset());
+    let results: Vec<_> = receiver.into_iter().map(Result::unwrap).collect();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|message| !message.deduplicated())
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|message| message.deduplicated())
+            .count(),
+        1
+    );
+    assert_eq!(results[0].partition_id(), results[1].partition_id());
+    assert_eq!(results[0].offset(), results[1].offset());
+    assert_eq!(results[0].message_id(), results[1].message_id());
+    assert_eq!(consume(&mut broker.lock().unwrap(), 10, 10).len(), 1);
+}
+
+#[test]
+fn concurrent_conflicting_publishes_commit_one_winner() {
+    let root = TempDir::new().unwrap();
+    let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+    create_topic(&mut broker, 3);
+    let broker = Arc::new(Mutex::new(broker));
+    let barrier = Arc::new(Barrier::new(3));
+    let (sender, receiver) = mpsc::channel();
+    let mut workers = Vec::new();
+
+    for (message_id, payload) in [("msg-a", b"intent-a".as_slice()), ("msg-b", b"intent-b")] {
+        let broker = Arc::clone(&broker);
+        let barrier = Arc::clone(&barrier);
+        let sender = sender.clone();
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            let result = broker.lock().unwrap().publish(PublishCommand::new(
+                topic_name(),
+                idempotent_envelope(message_id, "idem-conflict", payload),
+            ));
+            sender.send(result).unwrap();
+        }));
+    }
+    barrier.wait();
+    drop(sender);
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let results: Vec<_> = receiver.into_iter().collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(DurableBrokerError::Broker(
+                    BrokerError::IdempotencyKeyConflict { .. }
+                ))
+            ))
+            .count(),
+        1
+    );
+
+    let next = publish(&mut broker.lock().unwrap(), "msg-next");
+    assert_eq!(next.partition_id(), PartitionId::new(1));
+    assert_eq!(consume(&mut broker.lock().unwrap(), 10, 10).len(), 2);
+}
+
+#[test]
+fn concurrent_same_key_on_different_topics_remains_independent() {
+    let root = TempDir::new().unwrap();
+    let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+    create_topic(&mut broker, 1);
+    create_topic_named(&mut broker, other_topic_name(), 1);
+    let broker = Arc::new(Mutex::new(broker));
+    let barrier = Arc::new(Barrier::new(3));
+    let (sender, receiver) = mpsc::channel();
+    let mut workers = Vec::new();
+
+    for (topic, message_id, payload) in [
+        (topic_name(), "msg-orders", b"orders".as_slice()),
+        (other_topic_name(), "msg-payments", b"payments".as_slice()),
+    ] {
+        let broker = Arc::clone(&broker);
+        let barrier = Arc::clone(&barrier);
+        let sender = sender.clone();
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            let result = broker.lock().unwrap().publish(PublishCommand::new(
+                topic,
+                idempotent_envelope(message_id, "shared-key", payload),
+            ));
+            sender.send(result).unwrap();
+        }));
+    }
+    barrier.wait();
+    drop(sender);
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let results: Vec<_> = receiver.into_iter().map(Result::unwrap).collect();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|message| !message.deduplicated()));
+    assert_eq!(consume(&mut broker.lock().unwrap(), 10, 10).len(), 1);
+    assert_eq!(
+        consume_from(
+            &mut broker.lock().unwrap(),
+            other_topic_name(),
+            group_id(),
+            consumer_id(),
+            10,
+            10,
+        )
+        .len(),
+        1
+    );
 }
 
 #[test]
@@ -1462,4 +1804,88 @@ fn idempotent_publish_on_multiple_partitions_round_robin_preserved() {
     // Next unkeyed publish must land on partition 0 (round-robin wrapped).
     let d = publish(&mut broker, "msg-d");
     assert_eq!(d.partition_id().value(), 0);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(12))]
+
+    #[test]
+    fn reopen_preserves_idempotent_retry_identity(
+        payload in proptest::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let root = TempDir::new().unwrap();
+        let first = {
+            let mut broker = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+            create_topic(&mut broker, 3);
+            publish_idempotent(&mut broker, "msg-first", "idem-property", &payload)
+        };
+
+        let mut reopened = open_broker(&root, 3, Some(100), 1_000, 1024 * 1024);
+        let retry = publish_idempotent(&mut reopened, "msg-retry", "idem-property", &payload);
+
+        prop_assert!(retry.deduplicated());
+        prop_assert_eq!(retry.partition_id(), first.partition_id());
+        prop_assert_eq!(retry.offset(), first.offset());
+        prop_assert_eq!(retry.message_id(), first.message_id());
+        prop_assert_eq!(consume(&mut reopened, 100, 10).len(), 1);
+    }
+}
+
+#[test]
+#[ignore = "benchmark-style diagnostic; run explicitly"]
+fn benchmark_recovery_scaling() {
+    use std::time::Instant;
+
+    for record_count in [100, 1_000] {
+        let root = TempDir::new().unwrap();
+        {
+            let mut broker = open_broker(&root, 3, Some(100), 1_000, 64 * 1024);
+            create_topic(&mut broker, 4);
+            for index in 0..record_count {
+                publish(&mut broker, format!("message-{index}"));
+            }
+        }
+
+        let started = Instant::now();
+        let reopened = open_broker(&root, 3, Some(100), 1_000, 64 * 1024);
+        eprintln!(
+            "recovery records={record_count} elapsed={:?}",
+            started.elapsed()
+        );
+        drop(reopened);
+    }
+}
+
+#[test]
+#[ignore = "benchmark-style diagnostic; run explicitly"]
+fn benchmark_keyed_versus_unkeyed_recovery() {
+    use std::time::Instant;
+
+    for keyed in [false, true] {
+        let root = TempDir::new().unwrap();
+        {
+            let mut broker = open_broker(&root, 3, Some(100), 1_000, 64 * 1024);
+            create_topic(&mut broker, 4);
+            for index in 0..500 {
+                if keyed {
+                    publish_idempotent(
+                        &mut broker,
+                        format!("message-{index}"),
+                        format!("idem-{index}"),
+                        b"payload",
+                    );
+                } else {
+                    publish(&mut broker, format!("message-{index}"));
+                }
+            }
+        }
+
+        let started = Instant::now();
+        let reopened = open_broker(&root, 3, Some(100), 1_000, 64 * 1024);
+        eprintln!(
+            "recovery keyed={keyed} records=500 elapsed={:?}",
+            started.elapsed()
+        );
+        drop(reopened);
+    }
 }

@@ -1,6 +1,6 @@
 # Software Design Document
 
-FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`. Milestone 7 adds the first usable TypeScript CLI as an adapter over those Rust-owned APIs. Milestone 8 adds the first read-only TypeScript TUI over the HTTP control plane. Milestone 9 adds structured tracing and process-local Prometheus metrics. Milestone 11 adds `brokerd serve-all`, a unified single-process local runtime for coherent HTTP, gRPC, status, DLQ, and metrics demos.
+FerrumQ is a real broker/event bus foundation inspired by Kafka, RabbitMQ, NATS JetStream, and Pulsar. This document is the central specification. Milestone 0 implemented the repository skeleton, documentation, CI, and compile-tested placeholders. Milestone 1 implements the pure Rust `msg-core` domain layer. Milestone 2 implements synchronous deterministic in-memory broker orchestration in `msg-broker`. Milestone 3 implements the independent local append-only message-record log foundation in `msg-storage`. Milestone 4 adds a local durable `DurableBroker` with at-least-once delivery across broker reopen. Milestone 5 adds a local Axum HTTP control-plane API backed by `DurableBroker`. Milestone 6 adds a unary tonic/prost gRPC data-plane API backed by `DurableBroker`. Milestone 7 adds the first usable TypeScript CLI as an adapter over those Rust-owned APIs. Milestone 8 adds the first read-only TypeScript TUI over the HTTP control plane. Milestone 9 adds structured tracing and process-local Prometheus metrics. Milestone 11 adds `brokerd serve-all`, a unified single-process local runtime for coherent HTTP, gRPC, status, DLQ, and metrics demos. Milestone 14 adds topic-scoped durable producer publish idempotency.
 
 ## 1. Product Vision
 
@@ -54,7 +54,7 @@ Consumer groups coordinate consumption and track cursors. Milestone 2 maintains 
 
 ## 9. Publish Flow
 
-Milestone 2 publish flow validates the topic exists, selects a partition deterministically, appends the envelope to the in-memory partition log, and returns topic, partition, offset, and message ID metadata. Milestone 4 keeps `BrokerService` as the in-memory implementation and adds `DurableBroker`, whose publish path appends the envelope to `msg-storage::PartitionLog` before returning. A successfully published durable message is recoverable after broker reopen. A failed durable append returns an error and must not expose a phantom message.
+Milestone 2 publish flow validates the topic exists, selects a partition deterministically, appends the envelope to the in-memory partition log, and returns topic, partition, offset, and message ID metadata. Milestone 4 keeps `BrokerService` as the in-memory implementation and adds `DurableBroker`, whose publish path appends the envelope to `msg-storage::PartitionLog` before returning. A successfully published durable message is recoverable after broker reopen. A failed durable append returns an error and must not expose a phantom message. Milestone 14 checks topic-scoped idempotency before partition selection or mutation. Equivalent retries return the original identity without an append; conflicts and failed appends do not advance round-robin state or reserve a key.
 
 ## 10. Consume Flow
 
@@ -74,7 +74,16 @@ A message exceeding max delivery attempts moves to the DLQ for that consumer gro
 
 ## 14. Idempotency and Deduplication
 
-At-least-once delivery allows duplicates. Milestone 1 models message IDs and idempotency keys as validated values. Milestone 6 carries `idempotency_key` through the gRPC data plane as metadata only; it does not enforce producer deduplication. Deduplication windows and producer/consumer behavior remain future work.
+At-least-once delivery allows consumer redelivery duplicates. Milestone 14
+enforces producer-side publish deduplication when `idempotency_key` is present,
+scoped by `(topic, idempotency_key)`. Equivalence uses a stable SHA-256
+fingerprint of semantic intent; message ID, timestamp, and the key itself are
+excluded. Equivalent retries return the original partition, offset, and
+message ID. Conflicting reuse is rejected. The message log is the sole durable
+source of idempotency state: reopen scans all retained records to rebuild an
+in-memory index. There is no TTL, compaction, automatic retry, cross-process
+coordination, distributed guarantee, or exactly-once consumer processing. The
+index grows without bound while keyed records remain retained.
 
 ## 15. Backpressure Model
 
@@ -86,11 +95,11 @@ The target storage model is an append-only log per topic partition. Milestone 2 
 
 Each Milestone 3 storage record is framed as `u32_le record_length`, `u32_le crc32(payload)`, and a compact deterministic JSON payload containing `format_version = 1`, topic, partition, offset, and `MessageEnvelope`. Segment names are fixed 20-digit base offsets. Recovery scans segment files in parsed base-offset order, validates checksums, JSON, topic, partition, and offset continuity, and repairs only trailing damage in the final segment by truncating to the start of the damaged record.
 
-Message records and delivery state are separate durable concerns. `msg-storage` segment records are the source of message envelopes and offsets. The Milestone 4 broker-state JSONL log is the source of topic metadata and delivery transitions: consumed batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches. The executable broker-state contract is documented in [BROKER_STATE_FORMAT.md](BROKER_STATE_FORMAT.md). Indexes, retention, compaction, fsync policy tuning, APIs, clustering, replication, consensus, and TypeScript behavior remain deferred.
+Message records and delivery state are separate durable concerns. `msg-storage` segment records are the source of message envelopes, offsets, and publish-idempotency recovery. The Milestone 4 broker-state JSONL log is the source of topic metadata and delivery transitions: consumed batches, ACKs, NACK retry/DLQ outcomes, and retry maintenance batches. The executable broker-state contract is documented in [BROKER_STATE_FORMAT.md](BROKER_STATE_FORMAT.md). Milestone 14 adds only a reconstructed in-memory idempotency index; it adds no durable ledger or broker-state publish event. Retention, compaction, fsync policy tuning, clustering, replication, and consensus remain deferred.
 
 ## 17. Crash and Recovery Expectations
 
-A message appended through `msg-storage` must be recoverable according to the local segment recovery rules. In Milestone 4, a `DurableBroker` reopen replays topic metadata and delivery transitions from the broker-state JSONL log, reopens all message partition logs, reconstructs round-robin state from recovered unkeyed message count, preserves successful ACK/NACK/retry/DLQ transitions, and releases any remaining pending deliveries for immediate at-least-once redelivery. A final incomplete broker-state JSONL line may be truncated and ignored; malformed complete broker-state events are durable broker corruption errors. Durability is local filesystem durability, not replicated cluster durability.
+A message appended through `msg-storage` must be recoverable according to the local segment recovery rules. In Milestone 14, a `DurableBroker` reopen replays topic metadata and delivery transitions from the broker-state JSONL log, reopens and fully scans all message partition logs, reconstructs round-robin and publish-idempotency state, preserves successful ACK/NACK/retry/DLQ transitions, and releases any remaining pending deliveries for immediate at-least-once redelivery. A final damaged message record is repaired only under the storage trailing-repair rules; middle corruption remains fatal. A final incomplete broker-state JSONL line may be truncated and ignored; malformed complete broker-state events are durable broker corruption errors. Durability and synchronization are process-local, not replicated or distributed.
 
 ## 18. Control Plane
 
@@ -122,7 +131,7 @@ The data plane handles publish, consume, ACK, and NACK. Milestone 6 implements t
 - `Ack(AckRequest) -> AckResponse`.
 - `Nack(NackRequest) -> NackResponse`.
 
-`msg-data-plane` owns explicit protobuf-to-domain mapping, keeps `DurableBroker` behind `Arc<Mutex<_>>`, calls public broker APIs only, and returns sanitized gRPC statuses. Delivery is local durable at-least-once; consumers must be idempotent. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and unknown, duplicate, or stale deliveries map to `NOT_FOUND`; wrong delivery ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if encountered; poisoned broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected broker failures map to `INTERNAL`.
+`msg-data-plane` owns explicit protobuf-to-domain mapping, keeps `DurableBroker` behind `Arc<Mutex<_>>`, calls public broker APIs only, and returns sanitized gRPC statuses. Delivery is local durable at-least-once; consumers must be idempotent. Validation and malformed request values map to `INVALID_ARGUMENT`; unknown topics and unknown, duplicate, or stale deliveries map to `NOT_FOUND`; wrong delivery ownership maps to `FAILED_PRECONDITION`; duplicate topics map to `ALREADY_EXISTS` if encountered; idempotency conflicts map to `ALREADY_EXISTS` with the sanitized detail `idempotency key conflict`; poisoned broker state maps to `UNAVAILABLE`; storage, corruption, serialization, and unexpected broker failures map to `INTERNAL`.
 
 For local coherent demos and development, the same gRPC service is served by `brokerd serve-all` alongside the HTTP control plane. The older `brokerd serve-grpc` command remains a gRPC-only split-process runtime.
 
@@ -130,9 +139,9 @@ For local coherent demos and development, the same gRPC service is served by `br
 
 `brokerd serve-all` opens durable state once through `msg-control-api::open_state`, builds the HTTP router from that `AppState`, and builds `DataPlaneService::from_shared(state.broker())` for gRPC. The ownership model is the existing `Arc<Mutex<DurableBroker>>`; `DurableBroker` remains synchronous and local-filesystem backed.
 
-`serve-all` is the recommended local demo and development runtime because HTTP topic creation, gRPC publish/consume/ACK/NACK, HTTP status/DLQ, and HTTP `/metrics` observe one live process-local broker and metrics registry. It does not change storage format, protobuf messages, public HTTP/gRPC error shapes, retry semantics, or delivery guarantees.
+`serve-all` is the recommended local demo and development runtime because HTTP topic creation, gRPC publish/consume/ACK/NACK, HTTP status/DLQ, and HTTP `/metrics` observe one live process-local broker and metrics registry. Its mutex serializes publish-idempotency checks and appends only within that process. It does not add cross-process locking, automatic retries, or exactly-once delivery.
 
-`brokerd serve` remains HTTP-only. `brokerd serve-grpc` remains gRPC-only. In that split-process mode, each process loads durable state at startup, does not live-reload peer process mutations, and has process-local metrics. A shared `--data-dir` persists state across restarts but does not provide live shared in-memory state. Cross-process live reload, distributed locking, shared metrics aggregation, replication, cluster mode, auth/TLS/rate limiting, dashboards, OpenTelemetry collector integration, hosted telemetry, MaaS/SaaS telemetry, and exactly-once delivery remain deferred.
+`brokerd serve` remains HTTP-only. `brokerd serve-grpc` remains gRPC-only. In that split-process mode, each process loads durable state at startup, does not live-reload peer process mutations, and has process-local metrics. A shared `--data-dir` persists state across restarts but does not provide live shared in-memory state or a cross-process mutation lock; split processes must not be treated as a coordinated concurrent-write runtime. Cross-process live reload, distributed locking, shared metrics aggregation, replication, cluster mode, auth/TLS/rate limiting, dashboards, OpenTelemetry collector integration, hosted telemetry, MaaS/SaaS telemetry, and exactly-once delivery remain deferred.
 
 ## 20. TypeScript CLI
 
