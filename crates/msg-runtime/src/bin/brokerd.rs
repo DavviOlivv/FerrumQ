@@ -9,6 +9,12 @@ use tokio::net::TcpListener;
 use tonic::transport::Server;
 use tracing::{info, info_span};
 
+#[cfg(feature = "postgres")]
+use msg_postgres::{
+    PostgresConfig, migrations::run_migrations, projection::rebuild_projection,
+    repository::PostgresRepository,
+};
+
 #[derive(Debug, Parser)]
 #[command(name = "brokerd", version, about = "FerrumQ local broker runtime")]
 struct Cli {
@@ -53,6 +59,32 @@ enum Command {
         /// Socket address for the gRPC listener.
         #[arg(long, default_value = "127.0.0.1:9090")]
         grpc_listen: SocketAddr,
+    },
+
+    /// Manage the PostgreSQL metadata projection store.
+    #[cfg(feature = "postgres")]
+    #[command(subcommand)]
+    Postgres(PostgresSubcommand),
+}
+
+#[cfg(feature = "postgres")]
+#[derive(Debug, Subcommand)]
+enum PostgresSubcommand {
+    /// Run database migrations.
+    Migrate {
+        /// PostgreSQL connection URL.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// Rebuild the PostgreSQL metadata projection from the durable message log.
+    Rebuild {
+        /// Root directory for local durable broker state.
+        #[arg(long, default_value = "./.ferrumq")]
+        data_dir: PathBuf,
+
+        /// PostgreSQL connection URL.
+        #[arg(long)]
+        database_url: Option<String>,
     },
 }
 
@@ -101,8 +133,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             );
             serve_all(ServeAllConfig::new(data_dir, http_listen, grpc_listen)).await?;
         }
+        #[cfg(feature = "postgres")]
+        Some(Command::Postgres(sub)) => {
+            init_tracing_from_env()?;
+            if let Err(error) = handle_postgres(sub).await {
+                return Err(std::io::Error::other(error.to_string()).into());
+            }
+        }
         None => {}
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn handle_postgres(sub: PostgresSubcommand) -> Result<(), msg_postgres::PostgresError> {
+    match sub {
+        PostgresSubcommand::Migrate { database_url } => {
+            let config = PostgresConfig::from_env_or_flag(database_url)?;
+            let repo = PostgresRepository::connect(&config).await?;
+            run_migrations(repo.pool()).await?;
+            info!("migrations complete");
+            println!("PostgreSQL migrations complete");
+        }
+        PostgresSubcommand::Rebuild {
+            data_dir,
+            database_url,
+        } => {
+            let config = PostgresConfig::from_env_or_flag(database_url)?;
+            let repo = PostgresRepository::connect(&config).await?;
+            run_migrations(repo.pool()).await?;
+            let result = rebuild_projection(&repo, &data_dir).await?;
+            info!(
+                topics = result.topics_count,
+                messages = result.messages_count,
+                "projection rebuild complete"
+            );
+            println!(
+                "Projection rebuild complete: {} topics, {} messages",
+                result.topics_count, result.messages_count
+            );
+        }
+    }
     Ok(())
 }

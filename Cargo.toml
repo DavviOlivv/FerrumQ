@@ -5,6 +5,7 @@ members = [
     "crates/msg-core",
     "crates/msg-data-plane",
     "crates/msg-observability",
+    "crates/msg-postgres",
     "crates/msg-protocol",
     "crates/msg-runtime",
     "crates/msg-storage",

@@ -104,6 +104,42 @@ ports, arbitrary sleeps, or committed state are used. Explicit loopback
 permission failures are skipped; startup and correctness failures remain test
 failures.
 
+## PostgreSQL Integration Tests
+
+Milestone 15 adds optional PostgreSQL integration tests in
+`crates/msg-postgres`. These tests require a running PostgreSQL instance
+accessible via `FERRUMQ_POSTGRES_TEST_URL`. Each test creates a unique
+PostgreSQL schema (e.g. `test_migration_0`) for isolation and drops it after
+completion. Tests are skipped gracefully when the environment variable is
+absent.
+
+Covered scenarios:
+
+- Concurrent migration serialization, rerun safety, exact migration records,
+  hardened constraints, `message_offset` presence, and reserved `offset`
+  absence.
+- Failed migration non-registration and inconsistent migration metadata.
+- Repeatable topic/message upserts, named message-ID conflict translation,
+  topic isolation, JSONB headers, nullable keys/subjects, and sanitized
+  non-conflict database errors.
+- Projection run transitions, target validation, stale error clearing, counts,
+  and timestamps.
+- Two rebuilds with stable topics, unchanged message count, and one successful
+  run row per invocation.
+- Empty topics, authoritative partition counts, rolled segments, multiple
+  partitions, legacy unkeyed records, keyed records, and deduplicated retries.
+- Malformed complete broker-state records, storage corruption, invalid
+  partition layouts, sanitized failures, and no catchable lingering
+  `in_progress` rows.
+
+No unit test or existing test depends on PostgreSQL. The crate's unit tests
+(config precedence, URL sanitization, payload hash computation, row mapping)
+run without any database.
+
+For release-facing validation, use PostgreSQL 16, wait for readiness with
+`pg_isready`, and run both Cargo and nextest suites with
+`FERRUMQ_POSTGRES_TEST_URL` set.
+
 ## CI Gates
 
 The local and CI release gate is `make ci`, which runs:

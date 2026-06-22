@@ -1,0 +1,233 @@
+# PostgreSQL Metadata Store
+
+FerrumQ includes an **optional** PostgreSQL metadata/projection store for
+metadata queries, future search, audit views, and operational tooling.
+
+PostgreSQL is **not** required for broker operation. The append-only message
+log remains the source of truth. PostgreSQL stores derived metadata only:
+no raw payload bytes, no delivery state, no cursor/offset state.
+
+## Architecture
+
+```text
+Append-only message log = source of truth (msg-storage)
+       |
+       |  (offline rebuild)
+       v
+PostgreSQL metadata store = derived projection (msg-postgres)
+  - ferrumq_topics
+  - ferrumq_messages
+  - ferrumq_projection_runs
+```
+
+Broker publish, consume, ACK, and NACK never depend on PostgreSQL. If
+PostgreSQL is unavailable, the broker continues working normally.
+
+## Prerequisites
+
+- A running PostgreSQL server (local or remote).
+- `psql` client or `docker` for local setup.
+- The `FERRUMQ_DATABASE_URL` environment variable or `--database-url` flag.
+
+### Local PostgreSQL with Docker
+
+```sh
+docker run --name ferrumq-postgres \
+  -e POSTGRES_PASSWORD=ferrumq \
+  -p 5432:5432 \
+  -d postgres:16-alpine
+```
+
+Set the connection URL:
+
+```sh
+export FERRUMQ_DATABASE_URL=postgres://postgres:ferrumq@localhost:5432/postgres
+```
+
+## Commands
+
+### `brokerd postgres migrate`
+
+Runs schema migrations against the configured PostgreSQL database.
+
+```sh
+brokerd postgres migrate \
+  --database-url "$FERRUMQ_DATABASE_URL"
+```
+
+Creates the following tables if they do not exist:
+
+- `ferrumq_topics` — topic metadata (name, partition count, timestamps).
+- `ferrumq_messages` — message metadata only (no raw payload bytes).
+- `ferrumq_projection_runs` — tracks rebuild runs for operational visibility.
+- `_ferrumq_migrations` — tracks applied migrations.
+
+Migrations are idempotent. Running `migrate` multiple times is safe. Execution
+is serialized with a PostgreSQL advisory transaction lock. Applied versions and
+names are rechecked while serialized, schema SQL and tracking rows commit
+atomically, and failed migrations are not registered.
+
+### `brokerd postgres rebuild`
+
+Rebuilds the PostgreSQL metadata projection from the local durable message log.
+This is an **offline** operation that reads the data directory and upserts
+metadata into PostgreSQL.
+
+```sh
+brokerd postgres rebuild \
+  --data-dir ./.ferrumq \
+  --database-url "$FERRUMQ_DATABASE_URL"
+```
+
+The rebuild:
+
+1. Runs existing durable-broker recovery over broker-state metadata. Complete
+   malformed records fail; only the documented final incomplete JSONL line is
+   tolerated and truncated.
+2. Uses recovered topic metadata as the authoritative partition count,
+   including topics with no messages.
+3. Validates filesystem topic and partition IDs against that metadata.
+4. Reads every expected partition through existing storage recovery, including
+   rolled segments and records written before publish idempotency.
+5. Computes `payload_sha256` (SHA-256 hex digest of raw payload bytes).
+6. Upserts topic and message metadata rows.
+7. Records the run in `ferrumq_projection_runs` with status and counts.
+
+**Repeatability:** Running `rebuild` twice does not duplicate rows. Message
+rows use `ON CONFLICT (topic, partition_id, message_offset) DO NOTHING` for
+idempotency.
+
+**Data integrity:** If the same `message_id` appears at a different
+`(partition, message_offset)` than previously recorded, the rebuild fails with a
+`message_id conflict` error. This prevents silent data corruption.
+
+**Empty topics:** Topics that exist in broker metadata but have no message
+records are still projected into `ferrumq_topics` with their partition count.
+Their timestamps are assigned only on first insertion and remain stable.
+Message-bearing topics use deterministic minimum and maximum message
+timestamps.
+
+Each invocation creates one `in_progress` run and normally finishes it as
+`success` or `error`. If database connectivity is lost, the final status update
+may also be impossible, leaving the row `in_progress`.
+
+## Database URL Resolution
+
+1. `--database-url` CLI flag (takes precedence).
+2. `FERRUMQ_DATABASE_URL` environment variable.
+3. Missing URL produces a clear error for `postgres` commands only.
+
+The `database-url` must be a valid PostgreSQL connection URI:
+
+```text
+postgres://[user[:password]@][host][:port][/database][?options]
+```
+
+## Security
+
+- Database passwords are **never logged**. The connection URL is sanitized
+  before logging: `postgres://user:***@host:5432/db`.
+- Raw message payload bytes are **never stored** in PostgreSQL. Only metadata
+  and a SHA-256 payload hash are projected.
+- No payload, idempotency key, message ID, or topic values appear as metric
+  labels.
+- Connection, migration, query, storage, and projection failures return
+  sanitized messages without credentials, payloads, keys, or filesystem paths.
+
+## Schema
+
+### `ferrumq_topics`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `name` | `TEXT PRIMARY KEY` | Topic name |
+| `partitions` | `INTEGER NOT NULL` | Number of partitions |
+| `first_seen_at` | `TIMESTAMPTZ NOT NULL` | Earliest message timestamp (or projection time) |
+| `last_seen_at` | `TIMESTAMPTZ NOT NULL` | Latest message timestamp (or projection time) |
+
+### `ferrumq_messages`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `topic` | `TEXT NOT NULL` | Topic name |
+| `partition_id` | `INTEGER NOT NULL` | Partition ID |
+| `message_offset` | `BIGINT NOT NULL` | Offset within partition |
+| `message_id` | `TEXT NOT NULL` | Unique message identifier |
+| `idempotency_key` | `TEXT` | Optional idempotency key |
+| `partition_key` | `TEXT` | Optional partition key |
+| `payload_len` | `BIGINT NOT NULL` | Raw payload byte length |
+| `payload_sha256` | `TEXT NOT NULL` | SHA-256 hex digest of payload |
+| `content_type` | `TEXT NOT NULL` | Message content type |
+| `event_type` | `TEXT NOT NULL` | Message event type |
+| `source` | `TEXT NOT NULL` | Event source identifier |
+| `subject` | `TEXT` | Optional event subject |
+| `headers` | `JSONB NOT NULL` | Message headers as key-value pairs |
+| `time_unix_ms` | `BIGINT NOT NULL` | Message timestamp in Unix milliseconds |
+| `indexed_at` | `TIMESTAMPTZ NOT NULL` | When this row was projected |
+
+**Primary key:** `(topic, partition_id, message_offset)`.
+**Unique constraint:** `(topic, message_id)` — same `message_id` at a different
+message offset is rejected as a data integrity issue.
+
+The initial schema enforces positive topic partition counts, non-negative
+partition IDs, message offsets, payload lengths, and run counts, lowercase
+64-character SHA-256 text, valid run statuses, and status-consistent
+completion/error fields.
+
+### `ferrumq_projection_runs`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `BIGSERIAL PRIMARY KEY` | Auto-incrementing run ID |
+| `started_at` | `TIMESTAMPTZ NOT NULL` | When the rebuild started |
+| `completed_at` | `TIMESTAMPTZ` | When the rebuild completed |
+| `topics_count` | `INTEGER NOT NULL` | Number of topics upserted |
+| `messages_count` | `INTEGER NOT NULL` | Number of messages upserted |
+| `status` | `TEXT NOT NULL` | `in_progress`, `success`, or `error` |
+| `error_message` | `TEXT` | Sanitized error message on failure |
+
+## Testing
+
+Integration tests require a running PostgreSQL instance. Set the
+`FERRUMQ_POSTGRES_TEST_URL` environment variable:
+
+```sh
+export FERRUMQ_POSTGRES_TEST_URL=postgres://postgres:ferrumq@localhost:5432/postgres
+cargo test -p msg-postgres
+cargo nextest run -p msg-postgres
+```
+
+Each test creates a unique PostgreSQL schema (e.g. `test_migration_0`) and
+drops it after completion. Tests are skipped gracefully when the environment
+variable is absent:
+
+```sh
+# Tests skip with an informative message
+cargo test -p msg-postgres
+```
+
+## Limitations and Deferred Work
+
+- **Not a source of truth.** PostgreSQL does not own publish, delivery, cursor,
+  retry, DLQ, idempotency, or recovery state.
+- **No full-text search.** FTS, `tsvector`, `pg_trgm`, and `unaccent` are
+  deferred to a future search milestone.
+- **No continuous projection worker.** The rebuild is currently an offline
+  command. Live metadata streaming from the broker is deferred.
+- **No automatic cleanup or retention.** Projection data grows with the
+  message log. Retention policies are deferred.
+- **No raw payload storage.** Payload contents are never stored in PostgreSQL.
+  File/blob storage is deferred to a future milestone.
+- **No web dashboard.** PostgreSQL stores metadata that could power a
+  dashboard, but the dashboard itself is deferred.
+- **No FerrumQ-managed auth or TLS policy.** PostgreSQL authentication and
+  transport settings come only from the configured URL/server.
+- **No clustering, tenancy, or exactly-once behavior.** The projection does
+  not change FerrumQ's local durable at-least-once contract.
+
+## Related Documents
+
+- [ADR 0018: PostgreSQL Metadata Store](ADR/0018-postgresql-metadata-store.md)
+- [Architecture](ARCHITECTURE.md)
+- [SDD](SDD.md)
+- [Storage Format](STORAGE_FORMAT.md)
