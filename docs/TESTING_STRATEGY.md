@@ -157,11 +157,74 @@ search coverage:
 - Runtime CLI smoke tests cover `brokerd postgres search --help`, missing
   query, punctuation-only query, and invalid limit; all error paths
   sanitize credentials.
+- The `connect_with_pool_size(cfg, 4)` constructor supports two
+  concurrent `search_messages` calls through the same pool without
+  serialization or deadlock.
 
-No unit test or existing test depends on PostgreSQL. The crate's unit tests
-(config precedence, URL sanitization, payload hash computation, row mapping,
-search text computation, query validation, limit validation) run without
-any database.
+Milestone 17 extends the search exposure to user-facing surfaces. Tests
+follow the existing Tower-oneshot / temp-data-dir / `tokio::spawn`
+runtime patterns. The control-API suite uses a fake `MessageSearch`
+implementation injected into `AppState` so the tests do not require a
+real database:
+
+- `POST /v1/search/messages` returns `200` with camelCase items.
+  `offset` and `timeUnixMs` are decimal strings. `payloadLen` and
+  `rank` are JSON numbers. The response excludes `idempotencyKey`,
+  `partitionKey`, `headers`, and raw payload bytes.
+- `POST /v1/search/messages` returns `503 SEARCH_UNAVAILABLE` with a
+  sanitized envelope when the broker is started without a search
+  dependency. Other control-plane routes (health, topics, DLQ) are
+  unaffected.
+- The handler validates `query` (non-empty, at least one alphanumeric
+  character), `topic` (optional, must parse as a valid topic name
+  when present), and `limit` (`1..=100`, default `20`).
+- The handler rejects malformed JSON bodies, missing `Content-Type:
+  application/json`, and `GET` requests with `405 METHOD_NOT_ALLOWED`.
+- The handler returns `400 VALIDATION_ERROR` for `query`="",
+  `query`="   ", `query`="..." (punctuation-only), invalid topic, and
+  out-of-range limit.
+- A `tracing_subscriber` capture test asserts the search span emits no
+  raw query, no raw topic, no message IDs, no idempotency key, and no
+  database URL.
+- The TypeScript protocol package covers the request/response schemas
+  (decimal-string `offset` and `timeUnixMs` are required strings;
+  numeric `offset` is rejected), the 503 envelope mapping, and the
+  POST-with-JSON-body transport.
+- The `ferrumq search "<query>"` CLI command covers parser output,
+  human output, `--json` output, validation (empty query, invalid
+  limit, invalid topic), 503 propagation, privacy (no payload bytes
+  or idempotency key in output), and built CLI help.
+- The TUI `4 search` view covers view rendering, Unicode input
+  (typed text including `é`), search submission, unavailable state,
+  backend error state, backspace editing, and regression coverage
+  that printable characters (`q`, `r`, digits, `?`) type into the
+  search box instead of triggering global navigation. While the
+  search view is active, the outer global `useInput` handler is
+  gated so the per-view input owns all keys.
+- Runtime tests cover `serve-all --help` documenting
+  `--postgres-database-url`, `serve-all` returning 503 on the search
+  endpoint when no PostgreSQL URL is configured (while other
+  endpoints still work), `serve-all` failing startup with a sanitized
+  error when the URL is unreachable (no URL or password in stderr),
+  `serve-all` failing startup with a sanitized error on an invalid
+  `FERRUMQ_DATABASE_URL` or `--postgres-database-url`, and the
+  existing unified runtime test that `serve_all_with_listeners`
+  spawns correctly with the new `postgres_database_url` parameter.
+- One runtime test, `serve_all_search_endpoint_returns_200_with_real_postgres`,
+  spawns `serve_all_with_listeners` against a real PostgreSQL
+  database, inserts a row, and asserts that
+  `POST /v1/search/messages` returns 200 with the expected item
+  envelope (decimal-string `offset` and `timeUnixMs`, no raw
+  payload, no idempotency key). The test is gated on
+  `FERRUMQ_POSTGRES_TEST_URL` and is skipped when the variable is
+  absent or invalid. `make ci` does not set the variable, so this
+  test always runs in skip mode under the database-free default
+  gate.
+
+No unit test or non-gated test depends on PostgreSQL. The crate's
+unit tests (config precedence, URL sanitization, payload hash
+computation, row mapping, search text computation, query validation,
+limit validation) run without any database.
 
 For release-facing validation, use PostgreSQL 16, wait for readiness with
 `pg_isready`, and run both Cargo and nextest suites with

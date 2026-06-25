@@ -19,10 +19,12 @@ import {
   formatDlq,
   formatMessages,
   formatPublished,
+  formatSearch,
   formatStatus,
   formatTopic,
   formatTopicList,
   jsonLine,
+  searchJson,
 } from "./format.js";
 import {
   ackHelpText,
@@ -32,6 +34,7 @@ import {
   nackHelpText,
   publishHelpText,
   rootHelpText,
+  searchHelpText,
   topicHelpText,
   versionText,
 } from "./help.js";
@@ -46,6 +49,8 @@ import {
   validateBoundedText,
   validateConsumerGroup,
   validateNonEmptyPayload,
+  validateSearchLimit,
+  validateSearchQuery,
   validateTopic,
 } from "./validation.js";
 
@@ -96,6 +101,8 @@ export async function executeCommand(
       return text(ackHelpText());
     case "nack-help":
       return text(nackHelpText());
+    case "search-help":
+      return text(searchHelpText());
     case "broker-version":
       return text(await brokerdVersion(context)());
     case "health":
@@ -120,6 +127,8 @@ export async function executeCommand(
       return ack(context, command);
     case "nack":
       return nack(context, command);
+    case "search":
+      return search(context, command);
   }
 }
 
@@ -404,6 +413,24 @@ function required(value: string | undefined, flag: string): string {
     throw new ExpectedCliError(`${flag} is required`);
   }
   return value;
+}
+
+async function search(
+  context: CommandContext,
+  command: Extract<ParsedCommand, { kind: "search" }>,
+): Promise<CommandResult> {
+  const query = validateSearchQuery(command.query);
+  const topic =
+    command.topic === undefined ? undefined : validateTopic(command.topic);
+  const limit = validateSearchLimit(command.limit);
+  const response = await controlClient(context).searchMessages({
+    query,
+    ...(topic === undefined ? {} : { topic }),
+    limit,
+  });
+  return context.config.json
+    ? text(jsonLine(searchJson(response.items)))
+    : text(formatSearch(response.items));
 }
 
 function text(stdout: string): CommandResult {

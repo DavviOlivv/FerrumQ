@@ -46,6 +46,33 @@ export function validateNonEmptyPayload(value: string): string {
   return value;
 }
 
+export function validateSearchQuery(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new ExpectedCliError("search query must not be empty");
+  }
+  if (!/[A-Za-z0-9]/.test(trimmed)) {
+    throw new ExpectedCliError(
+      "search query must contain at least one alphanumeric character",
+    );
+  }
+  return trimmed;
+}
+
+export function validateSearchLimit(value: string | undefined): number {
+  if (value === undefined) {
+    return 20;
+  }
+  if (!/^\d+$/.test(value)) {
+    throw new ExpectedCliError("--limit must be a positive integer");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) {
+    throw new ExpectedCliError("--limit must be between 1 and 100");
+  }
+  return parsed;
+}
+
 export function parsePositiveInteger(
   value: string | undefined,
   field: string,

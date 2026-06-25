@@ -35,6 +35,8 @@ function wrapExpectedCliErrors(client: ControlPlaneClient): ControlPlaneClient {
     getTopic: (name) => withExpectedCliError(client.getTopic(name)),
     listTopics: () => withExpectedCliError(client.listTopics()),
     listDlq: (topic) => withExpectedCliError(client.listDlq(topic)),
+    searchMessages: (request) =>
+      withExpectedCliError(client.searchMessages(request)),
   };
 }
 

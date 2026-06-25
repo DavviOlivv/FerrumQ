@@ -189,8 +189,9 @@ docs/                Architecture, protocol, operation, release, and API docs
 FerrumQ can project message metadata into PostgreSQL for query,
 operational tooling, and full-text search. PostgreSQL is **not** required
 — the broker works without it. See [docs/POSTGRES.md](docs/POSTGRES.md),
-[ADR 0018](docs/ADR/0018-postgresql-metadata-store.md), and
-[ADR 0019](docs/ADR/0019-postgresql-full-text-search.md).
+[ADR 0018](docs/ADR/0018-postgresql-metadata-store.md),
+[ADR 0019](docs/ADR/0019-postgresql-full-text-search.md), and
+[ADR 0020](docs/ADR/0020-search-http-cli-tui-exposure.md).
 
 ```sh
 # Run migrations
@@ -201,6 +202,28 @@ brokerd postgres rebuild --data-dir ./.ferrumq --database-url "$DATABASE_URL"
 
 # Search projected message metadata
 brokerd postgres search --database-url "$DATABASE_URL" --query "order created"
+```
+
+The same search foundation is reachable from a running broker. The
+`brokerd serve-all` command accepts `--postgres-database-url <URL>`
+(with `FERRUMQ_DATABASE_URL` as the environment fallback). When set, the
+broker runs migrations at startup and exposes
+`POST /v1/search/messages`. HTTP search sends the query in the JSON
+body, so raw query text is not placed in HTTP URLs, access logs,
+proxies, or HTTP client logs. FerrumQ logs and traces do not persist the
+raw query. CLI search queries may still appear in shell history and
+process argv because they are typed as command arguments. Without a
+database configuration, the endpoint returns `503 SEARCH_UNAVAILABLE`.
+
+```sh
+# Start the broker with search enabled
+brokerd serve-all --postgres-database-url "$DATABASE_URL"
+
+# Search via the CLI (HTTP control plane)
+ferrumq search "order created" --topic orders --limit 20
+
+# Search via the TUI (press 4, type a query, press Enter)
+ferrumq-tui
 ```
 
 ## Docs Index

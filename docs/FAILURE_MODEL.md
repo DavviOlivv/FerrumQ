@@ -76,6 +76,15 @@ PostgreSQL is an optional metadata store. If PostgreSQL is unavailable:
 - `brokerd postgres search` validates the query string (non-empty, contains
   alphanumeric characters) and limit (1..=100) before connecting to the
   database, so invalid input fails immediately with a clear error.
+- `POST /v1/search/messages`, the `ferrumq search` CLI command, and
+  the TUI `4 search` view (added in M17) return `503 SEARCH_UNAVAILABLE`
+  with a sanitized envelope when `brokerd serve-all` is started
+  without a PostgreSQL configuration. The handler logs only
+  sanitized fields (no raw query, no query hash, no topic value, no
+  message IDs, no payload bytes, no idempotency key, no database URL).
+  When a URL is configured, an unreachable database **fails startup**
+  with a sanitized `RuntimeError::PostgresSetup` message; no URL or
+  password is logged. See [ADR 0020](ADR/0020-search-http-cli-tui-exposure.md).
 - `make ci` and all existing tests pass without PostgreSQL.
 - The append-only message log remains operational as the source of truth.
 

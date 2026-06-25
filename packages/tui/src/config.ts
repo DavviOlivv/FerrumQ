@@ -108,7 +108,13 @@ export function tuiHelpText(): string {
     "  FERRUMQ_GRPC_URL       environment fallback for --grpc-url",
     "",
     "Keys:",
-    "  1 dashboard   2 topics   3 DLQ   ? help   r refresh   q quit",
+    "  1 dashboard   2 topics   3 DLQ   4 search   ? help   r refresh   q quit",
+    "",
+    "Search:",
+    "  Type a query in the search view (4). Press Enter to send the request,",
+    "  Backspace to edit, Esc to return, and Ctrl+C to quit. Search requires",
+    "  the local broker to be started with --postgres-database-url or",
+    "  FERRUMQ_DATABASE_URL.",
   ].join("\n");
 }
 

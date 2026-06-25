@@ -40,6 +40,31 @@ was provided. It never logs the raw query or topic filter. Query and limit
 validation happen before any database connection, so invalid input fails
 immediately without logging a connection attempt.
 
+`POST /v1/search/messages` is the HTTP control-plane search endpoint
+added in M17. The handler logs only sanitized fields via
+`#[tracing::instrument(skip_all)]`:
+
+- `operation = "search_messages"`
+- `method = "POST"`
+- `route = "/v1/search/messages"`
+- `outcome` ("search_request" / "search_completed" / "search_unavailable"
+  / "search_backend_failed")
+- `result_count` (integer only)
+- `limit` (the bounded numeric limit, not the query)
+- `topic_filter_present` (boolean, never the topic value)
+- `postgres_configured` (boolean)
+- `status` (HTTP status code)
+
+The handler does not log the raw query, a query hash, the raw topic
+value, message IDs, the idempotency key, payload bytes, or the database
+URL. A dedicated regression test enforces this. HTTP search uses a
+`POST` JSON body, so raw query text is not placed in HTTP URLs, access
+logs, proxies, or HTTP client logs. FerrumQ itself does not persist the
+raw query in logs or traces. The `ferrumq search "<query>"` CLI command
+still receives the query as a CLI argument, so it may appear in shell
+history and process argv; operators should avoid secrets as CLI search
+queries when local shell history or process visibility matters.
+
 Examples:
 
 ```sh

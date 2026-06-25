@@ -17,6 +17,7 @@ export function rootHelpText(): string {
     "  ferrumq topic get <topic>",
     "  ferrumq topic list",
     "  ferrumq dlq list [--topic <topic>]",
+    "  ferrumq search <query> [--topic <topic>] [--limit <count>]",
     "",
     "Data-plane commands:",
     "  ferrumq publish <topic> --data <string> [--key <key>]",
@@ -122,6 +123,28 @@ export function nackHelpText(): string {
     "  ferrumq nack --help",
     "",
     "NACK uses the unary gRPC data plane.",
+  ].join("\n");
+}
+
+export function searchHelpText(): string {
+  return [
+    "FerrumQ search command",
+    "",
+    "Usage:",
+    "  ferrumq search <query> [--topic <topic>] [--limit <count>]",
+    "  ferrumq search --help",
+    "",
+    "Search returns up to <limit> (default 20, max 100) projected message rows",
+    "matching <query>. HTTP search sends the query in a POST JSON body, so raw",
+    "query text is not placed in HTTP URLs, access logs, proxies, or HTTP",
+    "client logs. FerrumQ logs and traces do not persist the raw query.",
+    "`ferrumq search <query>` still receives the query as a CLI argument, so",
+    "it may appear in shell history and process argv. Avoid secrets as CLI",
+    "search queries when local shell history or process visibility matters.",
+    "Search requires the local broker to be started with --postgres-database-url",
+    "or FERRUMQ_DATABASE_URL; otherwise the endpoint returns SEARCH_UNAVAILABLE.",
+    "",
+    "Search uses the HTTP control plane.",
   ].join("\n");
 }
 

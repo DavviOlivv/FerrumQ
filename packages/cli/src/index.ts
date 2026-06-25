@@ -68,6 +68,7 @@ function commandRequiresResolvedConfig(command: ParsedCommand): boolean {
     case "consume-help":
     case "ack-help":
     case "nack-help":
+    case "search-help":
     case "broker-version":
       return false;
     default:

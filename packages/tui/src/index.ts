@@ -4,6 +4,8 @@ export {
   FerrumQTui,
   type FerrumQTuiProps,
   HelpView,
+  type SearchDependencies,
+  type SearchUiState,
   StatusFooter,
   TopicsView,
   TuiFrame,

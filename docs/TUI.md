@@ -82,6 +82,28 @@ DLQ:
   and timestamp.
 - Empty state when no DLQ entries exist.
 
+Search:
+
+- Inline query input (press `4` to switch to this view). Type the query,
+  press `Enter` to issue the request, and press `Backspace` to edit.
+  Input is Unicode-safe and capped at 256 characters as a defensive
+  limit. While the Search view is active, global navigation keys (`q`,
+  `r`, `1`–`4`, `?`) are suppressed so the query can contain any
+  printable character; the keys resume normal behavior after the
+  user leaves the view.
+- Topic filtering from the TUI is **deferred in M17**. Use the
+  `ferrumq search <query> --topic <topic>` CLI command or
+  `POST /v1/search/messages` with an explicit `topic` body field for
+  topic-scoped searches.
+- Result rows show topic, partition, offset, message ID, event type,
+  source, subject, content type, time, payload length, shortened
+  payload SHA-256 (first 12 characters + `…`), and FTS rank.
+- Empty / loading / error / unavailable states are rendered
+  explicitly. Raw payload bytes and idempotency keys are never
+  rendered.
+- The query is sent in the `POST /v1/search/messages` JSON body. The
+  TUI does not log the query and does not call the gRPC data plane.
+
 Help:
 
 - In-app key bindings.
@@ -93,6 +115,7 @@ Help:
 - `1`: dashboard.
 - `2`: topics.
 - `3`: DLQ.
+- `4`: search.
 - `?`: help.
 
 There is no auto-refresh. Refresh is manual.
@@ -128,6 +151,10 @@ inspect lag, stream logs, fetch `/metrics`, call the gRPC data plane, start or
 supervise broker processes, or implement broker semantics.
 The configured gRPC URL is displayed for operator context only; it is not used
 for direct data-plane inspection.
+The Search view is a minimal foundation: it exposes an inline query input
+with Enter to submit and Backspace to edit. Topic filtering from the TUI
+itself is deferred in M17; cursor, scroll, copy/paste, search history,
+autosuggest, and saved searches are also deferred polish.
 Public SDK workflows, auth/RBAC, TLS, rate limiting, observability
 dashboards/export, clustering, replication, exactly-once semantics, and
 MaaS/multi-tenancy remain deferred.

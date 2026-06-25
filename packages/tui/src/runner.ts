@@ -1,7 +1,8 @@
-import { render } from "ink";
+import { createControlPlaneClient } from "@ferrumq/protocol";
+import { render as inkRender } from "ink";
 import { createElement, type ReactElement } from "react";
 
-import { FerrumQTui } from "./components.js";
+import { FerrumQTui, type SearchDependencies } from "./components.js";
 import {
   ExpectedTuiError,
   parseTuiArgs,
@@ -23,6 +24,7 @@ export type TuiRenderer = (element: ReactElement) => {
 export interface RunTuiCliOptions {
   env?: TuiEnvironment;
   renderTui?: TuiRenderer;
+  searchDependencies?: SearchDependencies;
 }
 
 export async function runTuiCli(
@@ -43,8 +45,13 @@ export async function runTuiCli(
     }
 
     const config = resolveTuiConfig(parsed, options.env);
-    const renderTui: TuiRenderer = options.renderTui ?? render;
-    const instance = renderTui(createElement(FerrumQTui, { config }));
+    const searchDependencies =
+      options.searchDependencies ??
+      defaultSearchDependencies(config.controlUrl);
+    const renderTui: TuiRenderer = options.renderTui ?? defaultTuiRenderer;
+    const instance = renderTui(
+      createElement(FerrumQTui, { config, searchDependencies }),
+    );
     await instance.waitUntilExit();
     return 0;
   } catch (error) {
@@ -56,6 +63,19 @@ export async function runTuiCli(
     writeError(output, errorMessage(error));
     return 1;
   }
+}
+
+function defaultTuiRenderer(element: ReactElement): {
+  waitUntilExit(): Promise<unknown>;
+} {
+  return inkRender(element, { exitOnCtrlC: false });
+}
+
+function defaultSearchDependencies(controlUrl: string): SearchDependencies {
+  const client = createControlPlaneClient(controlUrl);
+  return {
+    searchMessages: (request) => client.searchMessages(request),
+  };
 }
 
 function writeError(output: TuiCliOutput, message: string): void {

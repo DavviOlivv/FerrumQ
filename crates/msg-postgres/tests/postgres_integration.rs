@@ -71,7 +71,7 @@ fn schema_url(base_url: &str, schema: &str) -> String {
 
 async fn create_schema(base_url: &str, schema: &str) {
     let config = PostgresConfig::from_url(Some(base_url.to_owned())).unwrap();
-    let repo = PostgresRepository::connect(&config).await.unwrap();
+    let repo = PostgresRepository::connect(config).await.unwrap();
     sqlx::query(&format!("CREATE SCHEMA {schema}"))
         .execute(repo.pool())
         .await
@@ -80,7 +80,7 @@ async fn create_schema(base_url: &str, schema: &str) {
 
 async fn scoped_repo(base_url: &str, schema: &str) -> PostgresRepository {
     let config = PostgresConfig::from_url(Some(schema_url(base_url, schema))).unwrap();
-    PostgresRepository::connect(&config).await.unwrap()
+    PostgresRepository::connect(config).await.unwrap()
 }
 
 async fn migrated_repo(base_url: &str, schema: &str) -> PostgresRepository {
@@ -92,7 +92,7 @@ async fn migrated_repo(base_url: &str, schema: &str) -> PostgresRepository {
 
 async fn drop_schema(base_url: &str, schema: &str) {
     let config = PostgresConfig::from_url(Some(base_url.to_owned())).unwrap();
-    let repo = PostgresRepository::connect(&config).await.unwrap();
+    let repo = PostgresRepository::connect(config).await.unwrap();
     sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .execute(repo.pool())
         .await
@@ -1422,6 +1422,44 @@ async fn search_text_matches_compute_search_text_for_subject_and_no_subject() {
     assert_eq!(
         stored_without,
         msg_postgres::models::compute_search_text(&without_subject)
+    );
+
+    drop(repo);
+    drop_schema(&base_url, &schema).await;
+}
+
+#[tokio::test]
+async fn connect_with_pool_size_supports_serving_workload() {
+    let Some(base_url) = test_database_url() else {
+        eprintln!("Skipping: FERRUMQ_POSTGRES_TEST_URL not set");
+        return;
+    };
+    let schema = unique_schema("poolsize");
+    create_schema(&base_url, &schema).await;
+
+    let config = PostgresConfig::from_url(Some(schema_url(&base_url, &schema))).unwrap();
+    let repo = PostgresRepository::connect_with_pool_size(config, 4)
+        .await
+        .unwrap();
+    run_migrations(repo.pool()).await.unwrap();
+
+    let row = sample_message_row("orders", "msg-pool-1");
+    repo.upsert_message(&row).await.unwrap();
+
+    let query = SearchQuery::new("msg-pool-1", None, 5).unwrap();
+    let results = repo.search_messages(&query).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].message_id, "msg-pool-1");
+
+    let _concurrent = tokio::join!(
+        async {
+            let q = SearchQuery::new("msg-pool-1", None, 5).unwrap();
+            repo.search_messages(&q).await
+        },
+        async {
+            let q = SearchQuery::new("msg-pool-1", None, 5).unwrap();
+            repo.search_messages(&q).await
+        },
     );
 
     drop(repo);

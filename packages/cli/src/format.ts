@@ -3,6 +3,7 @@ import type {
   DataPlaneConsumedMessage,
   DataPlanePublishResponse,
   DlqEntryResponse,
+  SearchResult,
   TopicResponse,
 } from "@ferrumq/protocol";
 
@@ -91,4 +92,47 @@ export function consumedMessageJson(
 
 function emptyToNull(value: string): string | null {
   return value.length === 0 ? null : value;
+}
+
+const SHA256_PREFIX_LEN = 12;
+
+export function formatSearch(results: SearchResult[]): string {
+  if (results.length === 0) {
+    return "no results";
+  }
+  return results
+    .map((result) => {
+      const sha = shortenSha256(result.payloadSha256);
+      return [
+        `${result.topic}[${result.partitionId}]@${result.offset}`,
+        `message=${result.messageId}`,
+        `event=${result.eventType}`,
+        `source=${result.source}`,
+        `subject=${result.subject ?? ""}`,
+        `content=${result.contentType}`,
+        `time=${result.timeUnixMs}`,
+        `payload_len=${result.payloadLen}`,
+        `sha256=${sha}`,
+        `rank=${result.rank}`,
+      ].join("\t");
+    })
+    .join("\n");
+}
+
+/**
+ * Emits the full search result set (including the full 64-char
+ * `payloadSha256` hash) under the wrapper key `search`. Decimal-string
+ * fields (`offset`, `timeUnixMs`) are preserved as strings.
+ */
+export function searchJson(results: SearchResult[]): Record<string, unknown> {
+  return {
+    search: { items: results },
+  };
+}
+
+function shortenSha256(value: string): string {
+  if (value.length <= SHA256_PREFIX_LEN) {
+    return value;
+  }
+  return `${value.slice(0, SHA256_PREFIX_LEN)}…`;
 }

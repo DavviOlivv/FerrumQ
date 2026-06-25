@@ -105,6 +105,8 @@ postgres-test: postgres-wait
 		cargo test -p msg-postgres
 	@FERRUMQ_POSTGRES_TEST_URL="postgres://postgres:$(POSTGRES_PASSWORD)@127.0.0.1:$(POSTGRES_PORT)/postgres" \
 		cargo nextest run -p msg-postgres --no-fail-fast
+	@FERRUMQ_POSTGRES_TEST_URL="postgres://postgres:$(POSTGRES_PASSWORD)@127.0.0.1:$(POSTGRES_PORT)/postgres" \
+		cargo test -p msg-runtime --test brokerd serve_all_search_endpoint_returns_200_with_real_postgres -- --nocapture
 
 postgres-down:
 	@if docker container inspect "$(POSTGRES_CONTAINER)" >/dev/null 2>&1; then \

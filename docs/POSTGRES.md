@@ -194,6 +194,29 @@ The `database-url` must be a valid PostgreSQL connection URI:
 postgres://[user[:password]@][host][:port][/database][?options]
 ```
 
+### Enabling search on the unified runtime
+
+`brokerd serve-all` accepts a `--postgres-database-url <URL>` flag that
+takes precedence over `FERRUMQ_DATABASE_URL`. When neither is set, the
+server starts with search disabled (`POST /v1/search/messages` returns
+`503 SEARCH_UNAVAILABLE`). When set, the runtime:
+
+1. Connects via `PostgresRepository::connect_with_pool_size(&cfg, 4)` —
+   pool size 4, vs. the offline CLI tools' `connect()` which keeps pool
+   size 1.
+2. Calls `run_migrations(pool)` at startup. Migrations are
+   advisory-lock serialized and idempotent. Failures fail startup with a
+   sanitized `PostgreSQL setup failed: ...` message that does not
+   include the URL or password.
+3. Wraps the repository in an `Arc<dyn MessageSearch>` and wires it
+   into `AppState` so the HTTP control plane can answer search
+   requests.
+
+A startup failure with an unreachable database URL **fails startup**
+with a sanitized error when a URL is explicitly configured. The
+`PostgresConfig::sanitized_url()` helper masks the password and drops
+query parameters, so startup logs never include credentials.
+
 ## Security
 
 - Database passwords are **never logged**. The connection URL is sanitized
@@ -308,9 +331,20 @@ cargo test -p msg-postgres
 
 - **Not a source of truth.** PostgreSQL does not own publish, delivery, cursor,
   retry, DLQ, idempotency, or recovery state.
-- **Search is limited to the `brokerd postgres search` command.** HTTP, gRPC,
-  SDK, CLI, TUI, and chat search interfaces are deferred to a future milestone
-  (planned for M17).
+- **Search is exposed through `POST /v1/search/messages`, the `ferrumq search`
+  CLI command, and the TUI `4 search` view.** See [ADR
+  0020](ADR/0020-search-http-cli-tui-exposure.md). The search surface
+  requires the broker to be started with `--postgres-database-url` or
+  `FERRUMQ_DATABASE_URL`; otherwise the HTTP endpoint returns
+  `503 SEARCH_UNAVAILABLE`, the CLI surfaces a `SEARCH_UNAVAILABLE`
+  error, and the TUI shows a friendly unavailable state. The HTTP
+  request body carries the query (privacy-first: no query in HTTP URLs,
+  access logs, proxies, or HTTP client logs; FerrumQ logs and traces do
+  not persist the raw query). The `ferrumq search "<query>"` CLI command
+  still receives the query as a CLI argument, so it may appear in shell
+  history and process argv; avoid secrets as CLI search queries when
+  local shell history or process visibility matters. The gRPC data plane,
+  SDK workflows, and chat search remain deferred.
 - **Search covers safe metadata only.** Raw payload bytes, `idempotency_key`,
   `partition_key`, header keys/values, and `payload_sha256` are not indexed or
   returned. Payload search and file/blob search are deferred.

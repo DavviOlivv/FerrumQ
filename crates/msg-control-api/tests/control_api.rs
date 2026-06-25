@@ -19,6 +19,15 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
+#[cfg(feature = "postgres")]
+use std::sync::Arc as StdArc;
+
+#[cfg(feature = "postgres")]
+use msg_control_api::{MessageSearch, open_state_with_search};
+
+#[cfg(feature = "postgres")]
+use msg_postgres::{SearchQuery, SearchResult as PgSearchResult};
+
 const ALL_METRIC_NAMES: &[&str] = &[
     metric_names::CONTROL_HTTP_REQUESTS_TOTAL,
     metric_names::CONTROL_HTTP_ERRORS_TOTAL,
@@ -895,4 +904,437 @@ async fn internal_storage_errors_are_sanitized() {
             }
         })
     );
+}
+
+#[cfg(feature = "postgres")]
+mod search_endpoint_tests {
+    use super::*;
+
+    /// Fake search backend for control API tests. Returns a deterministic
+    /// payload that exercises the decimal-string and field-masking contract.
+    struct FakeSearch {
+        rows: Vec<PgSearchResult>,
+        failure: Option<String>,
+    }
+
+    impl FakeSearch {
+        fn with_rows(rows: Vec<PgSearchResult>) -> Self {
+            Self {
+                rows,
+                failure: None,
+            }
+        }
+
+        fn with_failure(message: &str) -> Self {
+            Self {
+                rows: Vec::new(),
+                failure: Some(message.to_owned()),
+            }
+        }
+    }
+
+    impl MessageSearch for FakeSearch {
+        fn search(
+            self: StdArc<Self>,
+            _query: SearchQuery,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<PgSearchResult>, String>> + Send>,
+        > {
+            let failure = self.failure.clone();
+            let rows = self.rows.clone();
+            Box::pin(async move {
+                if let Some(message) = failure {
+                    return Err(message);
+                }
+                Ok(rows)
+            })
+        }
+    }
+
+    fn sample_row() -> PgSearchResult {
+        PgSearchResult {
+            topic: "orders".to_owned(),
+            partition_id: 0,
+            offset: 12,
+            message_id: "msg-1".to_owned(),
+            event_type: "order.created".to_owned(),
+            source: "checkout-service".to_owned(),
+            subject: Some("order-1".to_owned()),
+            content_type: "application/json".to_owned(),
+            time_unix_ms: 1_700_000_000_000,
+            payload_len: 128,
+            payload_sha256: "0".repeat(64),
+            rank: 0.25,
+        }
+    }
+
+    fn router_with_fake_search(
+        root: &TempDir,
+        search: Option<StdArc<dyn MessageSearch>>,
+    ) -> Router {
+        let state = open_state_with_search(ControlApiConfig::new(root.path()), search).unwrap();
+        build_router(state)
+    }
+
+    #[tokio::test]
+    async fn search_messages_returns_items_envelope_with_decimal_strings() {
+        let root = TempDir::new().unwrap();
+        let fake = StdArc::new(FakeSearch::with_rows(vec![sample_row()]));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        let (status, body) = send(
+            &router,
+            json_request(
+                "POST",
+                "/v1/search/messages",
+                json!({ "query": "order", "topic": "orders", "limit": 5 }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item["topic"], "orders");
+        assert_eq!(item["partitionId"], 0);
+        assert_eq!(item["offset"], "12");
+        assert_eq!(item["messageId"], "msg-1");
+        assert_eq!(item["eventType"], "order.created");
+        assert_eq!(item["source"], "checkout-service");
+        assert_eq!(item["subject"], "order-1");
+        assert_eq!(item["contentType"], "application/json");
+        assert_eq!(item["timeUnixMs"], "1700000000000");
+        assert_eq!(item["payloadLen"], 128);
+        assert_eq!(item["payloadSha256"], "0".repeat(64));
+        assert!(item["rank"].is_number());
+        assert!(!item.as_object().unwrap().contains_key("idempotencyKey"));
+        assert!(!item.as_object().unwrap().contains_key("partitionKey"));
+        assert!(!item.as_object().unwrap().contains_key("headers"));
+        assert!(!item.as_object().unwrap().contains_key("payload"));
+        assert!(!body.as_object().unwrap().contains_key("query"));
+    }
+
+    #[tokio::test]
+    async fn search_messages_default_limit_is_twenty() {
+        let root = TempDir::new().unwrap();
+        let rows: Vec<PgSearchResult> = (0..5)
+            .map(|index| {
+                let mut row = sample_row();
+                row.message_id = format!("msg-{index}");
+                row
+            })
+            .collect();
+        let fake = StdArc::new(FakeSearch::with_rows(rows));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        let (status, body) = send(
+            &router,
+            json_request("POST", "/v1/search/messages", json!({ "query": "order" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"].as_array().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn search_messages_explicit_null_topic_is_accepted() {
+        let root = TempDir::new().unwrap();
+        let fake = StdArc::new(FakeSearch::with_rows(Vec::new()));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        let (status, _body) = send(
+            &router,
+            json_request(
+                "POST",
+                "/v1/search/messages",
+                json!({ "query": "order", "topic": null }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn search_messages_returns_unavailable_when_no_search_dependency() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        let (status, body) = send(
+            &router,
+            json_request("POST", "/v1/search/messages", json!({ "query": "order" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "SEARCH_UNAVAILABLE");
+        assert_eq!(body["error"]["message"], "search is not configured");
+        assert_eq!(body["error"]["statusCode"], 503);
+        assert_eq!(body["error"]["details"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn search_messages_validates_before_availability_no_pg() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        let (status, body) = send(
+            &router,
+            json_request(
+                "POST",
+                "/v1/search/messages",
+                json!({ "query": "order", "limit": 0 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn search_messages_validates_topic_before_availability_no_pg() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        let (status, body) = send(
+            &router,
+            json_request(
+                "POST",
+                "/v1/search/messages",
+                json!({ "query": "order", "topic": "bad name" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn search_messages_validates_blank_query_before_availability_no_pg() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        for query in ["", "   ", "...", "!!!"] {
+            let (status, body) = send(
+                &router,
+                json_request("POST", "/v1/search/messages", json!({ "query": query })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "query={query:?}");
+            assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_messages_unavailable_after_validation_passes_no_pg() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        let (status, body) = send(
+            &router,
+            json_request(
+                "POST",
+                "/v1/search/messages",
+                json!({ "query": "order", "limit": 5 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "SEARCH_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn search_messages_rejects_empty_query() {
+        let root = TempDir::new().unwrap();
+        let fake = StdArc::new(FakeSearch::with_rows(Vec::new()));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        for query in ["", "   ", "...", "!!!"] {
+            let (status, body) = send(
+                &router,
+                json_request("POST", "/v1/search/messages", json!({ "query": query })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "query={query:?}");
+            assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("search query")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_messages_rejects_invalid_topic() {
+        let root = TempDir::new().unwrap();
+        let fake = StdArc::new(FakeSearch::with_rows(Vec::new()));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        let (status, body) = send(
+            &router,
+            json_request(
+                "POST",
+                "/v1/search/messages",
+                json!({ "query": "order", "topic": "bad name" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn search_messages_rejects_out_of_range_limit() {
+        let root = TempDir::new().unwrap();
+        let fake = StdArc::new(FakeSearch::with_rows(Vec::new()));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        for limit in [0_u32, 101_u32] {
+            let (status, body) = send(
+                &router,
+                json_request(
+                    "POST",
+                    "/v1/search/messages",
+                    json!({ "query": "order", "limit": limit }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "limit={limit}");
+            assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+            assert!(body["error"]["message"].as_str().unwrap().contains("limit"));
+        }
+    }
+
+    #[tokio::test]
+    async fn search_messages_sanitizes_backend_failure() {
+        let root = TempDir::new().unwrap();
+        let fake = StdArc::new(FakeSearch::with_failure("database query failed"));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        let (status, body) = send(
+            &router,
+            json_request("POST", "/v1/search/messages", json!({ "query": "order" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "SEARCH_UNAVAILABLE");
+        assert_eq!(body["error"]["message"], "database query failed");
+    }
+
+    #[tokio::test]
+    async fn search_messages_rejects_unsupported_method() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        let (status, body) = send(&router, empty_request("GET", "/v1/search/messages")).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body["error"]["code"], "METHOD_NOT_ALLOWED");
+    }
+
+    #[tokio::test]
+    async fn search_messages_rejects_missing_content_type() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/search/messages")
+            .body(Body::from(json!({ "query": "order" }).to_string()))
+            .unwrap();
+
+        let (status, body) = send(&router, request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn search_messages_rejects_malformed_json() {
+        let root = TempDir::new().unwrap();
+        let router = router_with_fake_search(&root, None);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/search/messages")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))
+            .unwrap();
+
+        let (status, body) = send(&router, request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn search_messages_does_not_log_raw_query_or_topic() {
+        use std::sync::{Arc as StdArc2, Mutex as StdMutex};
+        use tracing::instrument::WithSubscriber;
+
+        struct CaptureWriter(StdArc2<StdMutex<Vec<u8>>>);
+        impl std::io::Write for CaptureWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                Self(self.0.clone())
+            }
+        }
+
+        let buffer = StdArc2::new(StdMutex::new(Vec::new()));
+        let writer = CaptureWriter(buffer.clone());
+        let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+            .json()
+            .with_writer(writer)
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_level(false)
+            .with_current_span(false)
+            .with_span_list(false)
+            .finish();
+
+        const SENTINEL_QUERY: &str = "super-secret-token-9f8a7b6c5d4e3f2a1b0c";
+        const SENTINEL_TOPIC: &str = "sensitive-customer-topic-9f8a7b6c";
+
+        let root = TempDir::new().unwrap();
+        let fake = StdArc::new(FakeSearch::with_rows(vec![sample_row()]));
+        let router = router_with_fake_search(&root, Some(fake));
+
+        // Attach the capture subscriber to this future on every poll. A
+        // thread-local default around `.await` can miss events if the runtime
+        // resumes the future on another worker thread.
+        let _ = async {
+            send(
+                &router,
+                json_request(
+                    "POST",
+                    "/v1/search/messages",
+                    json!({ "query": SENTINEL_QUERY, "topic": SENTINEL_TOPIC, "limit": 5 }),
+                ),
+            )
+            .await
+        }
+        .with_subscriber(subscriber)
+        .await;
+
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(
+            !output.contains(SENTINEL_QUERY),
+            "raw search query leaked into log: {output}"
+        );
+        assert!(
+            !output.contains(SENTINEL_TOPIC),
+            "raw topic leaked into log: {output}"
+        );
+    }
 }
