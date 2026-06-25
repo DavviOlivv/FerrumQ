@@ -52,6 +52,61 @@ export const dlqListResponseSchema = z.object({
 
 export type DlqListResponse = z.infer<typeof dlqListResponseSchema>;
 
+/**
+ * Decimal-string schema for HTTP responses that carry `uint64` values from
+ * the Rust control plane. The Rust side always serializes these fields as
+ * decimal strings to preserve precision across the JSON boundary.
+ */
+export const decimalStringSchema = z
+  .string()
+  .regex(/^\d+$/, "expected a non-negative decimal integer string");
+
+export const searchResultSchema = z.object({
+  topic: z.string().min(1),
+  partitionId: z.number().int().nonnegative(),
+  offset: decimalStringSchema,
+  messageId: z.string().min(1),
+  eventType: z.string(),
+  source: z.string(),
+  subject: z.string().nullable(),
+  contentType: z.string(),
+  timeUnixMs: decimalStringSchema,
+  payloadLen: z.number().int().nonnegative(),
+  payloadSha256: z.string(),
+  rank: z.number(),
+});
+
+export type SearchResult = z.infer<typeof searchResultSchema>;
+
+export const searchMessagesResponseSchema = z.object({
+  items: z.array(searchResultSchema),
+});
+
+export type SearchMessagesResponse = z.infer<
+  typeof searchMessagesResponseSchema
+>;
+
+/**
+ * Request body for `POST /v1/search/messages`. The query is sent in the body
+ * (not the URL) so raw user input is not placed in HTTP URLs, access logs,
+ * proxies, or HTTP client logs. CLI wrappers still receive typed queries as
+ * process arguments.
+ *
+ * The schema is `.strict()` so callers cannot smuggle in extra fields
+ * (`idempotencyKey`, `payload`, `partitionKey`, `headers`, ...) that the
+ * search surface does not consume. This is enforced outbound by
+ * `createControlPlaneClient`'s `searchMessages` call.
+ */
+export const searchMessagesRequestSchema = z
+  .object({
+    query: z.string().min(1),
+    topic: z.string().min(1).nullable().optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  })
+  .strict();
+
+export type SearchMessagesRequest = z.infer<typeof searchMessagesRequestSchema>;
+
 export const ferrumQErrorEnvelopeSchema = z.object({
   error: z.object({
     code: z.string().min(1),
@@ -98,6 +153,10 @@ export interface ControlPlaneClient {
     topic?: string,
     options?: ControlPlaneCallOptions,
   ): Promise<DlqListResponse>;
+  searchMessages(
+    request: SearchMessagesRequest,
+    options?: ControlPlaneCallOptions,
+  ): Promise<SearchMessagesResponse>;
 }
 
 export interface ControlPlaneCallOptions {
@@ -224,6 +283,17 @@ export function createControlPlaneClient(
         undefined,
         options,
       ),
+    searchMessages: (searchRequest, options) =>
+      request(
+        controlUrl,
+        fetchImpl,
+        "POST",
+        "/v1/search/messages",
+        searchMessagesResponseSchema,
+        searchRequest,
+        options,
+        searchMessagesRequestSchema,
+      ),
   };
 }
 
@@ -235,7 +305,11 @@ async function request<T>(
   schema: ZodType<T>,
   body?: unknown,
   options?: ControlPlaneCallOptions,
+  bodySchema?: ZodType<unknown>,
 ): Promise<T> {
+  if (body !== undefined && bodySchema !== undefined) {
+    bodySchema.parse(body);
+  }
   const url = buildUrl(controlUrl, requestPath);
   let response: ResponseLike;
   try {

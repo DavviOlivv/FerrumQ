@@ -13,7 +13,7 @@ The monolith is modular through crate boundaries:
 - `msg-storage`: local durable storage adapter/foundation. Milestone 3 implements a synchronous segment-backed append-only log per topic partition with framed JSON message records, CRC32 checksums, zero-based gapless offset assignment for successful appends, segment rolling, reopen recovery, and final-segment trailing-record repair.
 - `msg-broker`: broker orchestration and delivery flow. Milestone 2 implements `BrokerService` as synchronous deterministic in-memory state with topic creation, publish, consume, ACK, NACK, retry maintenance, lease expiry, and in-memory DLQ. Milestone 4 adds `DurableBroker`, a synchronous local durable broker that uses `msg-storage` for message records and a JSONL broker-state log for topic metadata and delivery transitions. Milestone 14 adds publish idempotency with SHA-256 intent fingerprinting, deduplication, conflict rejection, and recovery-time index rebuild from the message log.
 - `msg-runtime`: daemon entrypoints, configuration, and runtime wiring. Milestone 5 wires `brokerd serve` to the local control-plane HTTP router. Milestone 6 wires `brokerd serve-grpc` to the local data-plane gRPC service. Milestone 11 adds `brokerd serve-all`, which serves both adapters in one process with one shared local durable broker.
-- `msg-control-api`: Axum control plane adapter. Milestone 5 implements health, readiness, status, topic admin, topic inspection, and DLQ inspection endpoints backed by `DurableBroker`.
+- `msg-control-api`: Axum control plane adapter. Milestone 5 implements health, readiness, status, topic admin, topic inspection, and DLQ inspection endpoints backed by `DurableBroker`. Milestone 17 adds the optional `POST /v1/search/messages` endpoint behind a `postgres` Cargo feature; the search dependency is an `Option<Arc<dyn MessageSearch>>` on `AppState` and is `None` unless `serve-all` is started with a PostgreSQL URL.
 - `msg-data-plane`: tonic gRPC data-plane adapter. Milestone 6 implements unary publish, consume, ACK, and NACK RPCs backed by `DurableBroker`.
 - `msg-observability`: shared observability helpers. Milestone 9 implements
   tracing initialization, stable metric names, a process-local counter registry,
@@ -24,8 +24,12 @@ The monolith is modular through crate boundaries:
   implements offline rebuild (`brokerd postgres rebuild`). It reuses
   `msg-broker` recovery for validated topic metadata and `msg-storage` recovery
   for partition scanning; it is not wired into live broker mutation paths.
-  Milestone 16 adds full-text search over safe projected metadata
-  (`brokerd postgres search`).
+   Milestone 16 adds full-text search over safe projected metadata
+   (`brokerd postgres search`). Milestone 17 wires the search
+   repository into the unified runtime so `POST /v1/search/messages`,
+   the `ferrumq search` CLI command, and the TUI `4 search` view can
+   answer search requests against a running `brokerd serve-all`
+   process. See [ADR 0020](ADR/0020-search-http-cli-tui-exposure.md).
 - `msg-test-harness`: deterministic test and failure-simulation helpers.
 
 ## Hexagonal Architecture

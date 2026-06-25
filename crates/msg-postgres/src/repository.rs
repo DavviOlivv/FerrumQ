@@ -21,12 +21,26 @@ impl PostgresRepository {
     /// Connects to PostgreSQL and returns a repository handle.
     ///
     /// The pool uses a single connection for the offline rebuild command.
-    pub async fn connect(config: &PostgresConfig) -> Result<Self, PostgresError> {
-        log_database_target(&config.sanitized_url());
+    pub async fn connect(config: PostgresConfig) -> Result<Self, PostgresError> {
+        Self::connect_with_pool_size(config, 1).await
+    }
+
+    /// Connects to PostgreSQL with a configurable pool size for serving
+    /// workloads (HTTP control plane, future SDK clients). Larger pools let
+    /// concurrent request handlers proceed in parallel instead of serializing
+    /// on a single connection. Use [`Self::connect`] for the offline
+    /// rebuild/search subcommands, which need exactly one connection.
+    pub async fn connect_with_pool_size(
+        config: PostgresConfig,
+        max_connections: u32,
+    ) -> Result<Self, PostgresError> {
+        let database_url = config.database_url().to_owned();
+        let sanitized = config.sanitized_url();
+        log_database_target(&sanitized);
         let pool = PgPoolOptions::new()
-            .max_connections(1)
+            .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(5))
-            .connect(config.database_url())
+            .connect(&database_url)
             .await
             .map_err(PostgresError::ConnectionFailed)?;
         Ok(Self { pool })

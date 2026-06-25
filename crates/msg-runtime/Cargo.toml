@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 axum = "0.8"
 clap.workspace = true
-msg-control-api = { path = "../msg-control-api" }
+msg-control-api = { path = "../msg-control-api", default-features = false }
 msg-data-plane = { path = "../msg-data-plane" }
 msg-observability = { path = "../msg-observability" }
 msg-postgres = { path = "../msg-postgres", optional = true }
@@ -20,13 +20,16 @@ tracing.workspace = true
 
 [features]
 default = ["postgres"]
-postgres = ["msg-postgres"]
+postgres = ["dep:msg-postgres", "msg-control-api/postgres"]
 
 [dev-dependencies]
+msg-postgres = { path = "../msg-postgres" }
 msg-protocol = { path = "../msg-protocol" }
 serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
 tempfile = "3"
 tracing-subscriber.workspace = true
+url = "2"
 
 [lib]
 path = "src/lib.rs"

@@ -21,6 +21,8 @@ import {
   parseTuiArgs,
   resolveTuiConfig,
   runTuiCli,
+  type SearchDependencies,
+  type SearchUiState,
   TopicsView,
   type TuiConfig,
   TuiFrame,
@@ -206,6 +208,9 @@ describe("TUI loader", () => {
         calls.push("dlq");
         return { items: [sampleDlqEntry()] };
       },
+      async searchMessages() {
+        throw new Error("unexpected searchMessages call");
+      },
     };
 
     await expect(
@@ -318,7 +323,11 @@ describe("TUI rendering", () => {
           error: undefined,
           refreshCount: 1,
           lastRefreshAt: snapshot.refreshedAt,
+          search: emptySearchState(),
         }}
+        onSubmitSearch={() => {}}
+        onChangeSearchQuery={() => {}}
+        onChangeSearchTopic={() => {}}
       />,
     );
 
@@ -339,7 +348,10 @@ describe("TUI rendering", () => {
     expect(view.lastFrame()).toContain("last error: none");
     expect(view.lastFrame()).toContain("refreshes=1");
     expect(view.lastFrame()).toContain(
-      "keys: 1 dashboard 2 topics 3 DLQ ? help r refresh q quit",
+      "keys: 1 dashboard 2 topics 3 DLQ 4 search ? help r refresh q quit",
+    );
+    expect(view.lastFrame()).toContain(
+      "search: Enter submit Backspace edit Esc back Ctrl+C quit",
     );
     view.unmount();
   });
@@ -355,7 +367,11 @@ describe("TUI rendering", () => {
           error: undefined,
           refreshCount: 0,
           lastRefreshAt: undefined,
+          search: emptySearchState(),
         }}
+        onSubmitSearch={() => {}}
+        onChangeSearchQuery={() => {}}
+        onChangeSearchTopic={() => {}}
       />,
     );
     expect(loading.lastFrame()).toContain("view: topics | loading");
@@ -373,7 +389,11 @@ describe("TUI rendering", () => {
           error: "control API refresh failed: status exploded",
           refreshCount: 1,
           lastRefreshAt: new Date("2026-06-11T12:00:00.000Z"),
+          search: emptySearchState(),
         }}
+        onSubmitSearch={() => {}}
+        onChangeSearchQuery={() => {}}
+        onChangeSearchTopic={() => {}}
       />,
     );
     expect(errored.lastFrame()).toContain(
@@ -395,6 +415,7 @@ describe("TUI rendering", () => {
           error: undefined,
           refreshCount: 1,
           lastRefreshAt: sampleSnapshot().refreshedAt,
+          search: emptySearchState(),
         }}
       />,
     );
@@ -424,6 +445,7 @@ describe("TUI rendering", () => {
           error: "control API refresh failed: status exploded",
           refreshCount: 1,
           lastRefreshAt: undefined,
+          search: emptySearchState(),
         }}
       />,
     );
@@ -470,9 +492,13 @@ describe("TUI rendering", () => {
     expect(view.lastFrame()).toContain("1 dashboard");
     expect(view.lastFrame()).toContain("2 topics");
     expect(view.lastFrame()).toContain("3 DLQ");
+    expect(view.lastFrame()).toContain("4 search");
     expect(view.lastFrame()).toContain("? help");
     expect(view.lastFrame()).toContain("r refresh");
     expect(view.lastFrame()).toContain("q quit");
+    expect(view.lastFrame()).toContain(
+      "Search mode: Enter search, Backspace edit, Esc back, Ctrl+C quit",
+    );
     view.unmount();
   });
 });
@@ -480,7 +506,11 @@ describe("TUI rendering", () => {
 describe("TUI interactions", () => {
   it("keeps Topics loading state distinct before the first snapshot", async () => {
     const view = render(
-      <FerrumQTui config={config} dependencies={{ client: pendingClient() }} />,
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: pendingClient() }}
+        searchDependencies={fakeSearchDependencies()}
+      />,
     );
 
     view.stdin.write("2");
@@ -491,7 +521,11 @@ describe("TUI interactions", () => {
 
   it("keeps DLQ loading state distinct before the first snapshot", async () => {
     const view = render(
-      <FerrumQTui config={config} dependencies={{ client: pendingClient() }} />,
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: pendingClient() }}
+        searchDependencies={fakeSearchDependencies()}
+      />,
     );
 
     view.stdin.write("3");
@@ -505,6 +539,7 @@ describe("TUI interactions", () => {
       <FerrumQTui
         config={config}
         dependencies={{ client: failingStartupClient() }}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -519,6 +554,7 @@ describe("TUI interactions", () => {
       <FerrumQTui
         config={config}
         dependencies={{ client: failingStartupClient() }}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -539,6 +575,7 @@ describe("TUI interactions", () => {
           ]),
           now: () => new Date("2026-06-11T12:00:00.000Z"),
         }}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -562,6 +599,7 @@ describe("TUI interactions", () => {
           ]),
           now: () => new Date("2026-06-11T12:00:00.000Z"),
         }}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -586,6 +624,7 @@ describe("TUI interactions", () => {
           ]),
           now: () => new Date("2026-06-11T12:00:00.000Z"),
         }}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -615,6 +654,7 @@ describe("TUI interactions", () => {
           client,
           now: () => new Date("2026-06-11T12:00:00.000Z"),
         }}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -629,6 +669,7 @@ describe("TUI interactions", () => {
     ["1", "topics", "broker mode: durable"],
     ["2", "dashboard", "orders partitions=3"],
     ["3", "dashboard", "orders[0]@42"],
+    ["4", "dashboard", "view: search"],
     ["?", "dashboard", "view: help"],
   ] as const)("handles %s view key", async (key, initialView, expected) => {
     const view = render(
@@ -637,6 +678,7 @@ describe("TUI interactions", () => {
         dependencies={{ client: sampleClient() }}
         initialView={initialView}
         initialSnapshot={sampleSnapshot()}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -653,6 +695,7 @@ describe("TUI interactions", () => {
         dependencies={{ client: pendingClient() }}
         initialSnapshot={sampleSnapshot()}
         onExit={onExit}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -674,6 +717,7 @@ describe("TUI interactions", () => {
         config={config}
         dependencies={{ client }}
         initialSnapshot={sampleSnapshot()}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -692,6 +736,7 @@ describe("TUI interactions", () => {
       <FerrumQTui
         config={config}
         dependencies={{ client: controlled.client }}
+        searchDependencies={fakeSearchDependencies()}
       />,
     );
 
@@ -708,6 +753,251 @@ describe("TUI interactions", () => {
     expect(view.lastFrame()).toContain("topic count: 1");
     expect(view.lastFrame()).not.toContain("topic count: 2");
     expect(view.lastFrame()).toContain("refreshes=1");
+    view.unmount();
+  });
+});
+
+describe("TUI search view", () => {
+  const searchResults: Array<{
+    topic: string;
+    partitionId: number;
+    offset: string;
+    messageId: string;
+    eventType: string;
+    source: string;
+    subject: string | null;
+    contentType: string;
+    timeUnixMs: string;
+    payloadLen: number;
+    payloadSha256: string;
+    rank: number;
+  }> = [
+    {
+      topic: "orders",
+      partitionId: 0,
+      offset: "12",
+      messageId: "msg-1",
+      eventType: "order.created",
+      source: "/tests",
+      subject: "order/1",
+      contentType: "application/json",
+      timeUnixMs: "1700000000000",
+      payloadLen: 128,
+      payloadSha256: "f".repeat(64),
+      rank: 0.25,
+    },
+  ];
+
+  function searchView(
+    overrides: { search?: ReturnType<typeof fakeSearchDependencies> } = {},
+  ) {
+    return render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: sampleClient() }}
+        initialSnapshot={sampleSnapshot()}
+        searchDependencies={
+          overrides.search ?? fakeSearchDependencies(searchResults)
+        }
+      />,
+    );
+  }
+
+  it("renders the search view placeholder before a query is submitted", async () => {
+    const view = searchView();
+    view.stdin.write("4");
+    await waitForFrame(view, "(type a query, then press Enter)");
+    expect(view.lastFrame()).toContain(
+      "Enter to search; Backspace to edit; Esc back; Ctrl+C quit.",
+    );
+    view.unmount();
+  });
+
+  it("submits a search on Enter and renders the result row", async () => {
+    const view = searchView();
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    await waitForFrame(view, "(type a query, then press Enter)");
+    view.stdin.write("café");
+    await waitForFrame(view, "query: café");
+    view.stdin.write("\r");
+    await waitForFrame(view, "1 result");
+    const frame = view.lastFrame();
+    expect(frame).toContain("1 result");
+    expect(frame).toContain("orders[0]@12");
+    expect(frame).toContain("message=msg-1");
+    expect(frame).toContain("event=order.created");
+    expect(frame).toContain("source=/tests");
+    expect(frame).toContain("subject=order/1");
+    expect(frame).toContain("content=application/json");
+    expect(frame).toContain("time=1700000000000");
+    expect(frame).toContain("payload_len=128");
+    expect(frame).toContain("sha256=ffffffffffff…");
+    expect(frame).toContain("rank=0.25");
+    expect(frame).not.toContain("idempotency");
+    expect(frame).not.toContain('payload":');
+    view.unmount();
+  });
+
+  it("renders the unavailable error when search is not configured", async () => {
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: sampleClient() }}
+        initialSnapshot={sampleSnapshot()}
+      />,
+    );
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("order");
+    await waitForFrame(view, "query: order");
+    view.stdin.write("\r");
+    await waitForFrame(view, "search unavailable");
+    view.unmount();
+  });
+
+  it("surfaces backend errors as a non-zero error state", async () => {
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: sampleClient() }}
+        initialSnapshot={sampleSnapshot()}
+        searchDependencies={fakeSearchDependencies(
+          [],
+          new Error("HTTP 500 INTERNAL_ERROR: internal server error"),
+        )}
+      />,
+    );
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("order");
+    await waitForFrame(view, "query: order");
+    view.stdin.write("\r");
+    await waitForFrame(view, "error: HTTP 500");
+    view.unmount();
+  });
+
+  it("backspace edits the in-flight query", async () => {
+    const view = searchView();
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("abc");
+    await waitForFrame(view, "query: abc");
+    view.stdin.write("\u007f");
+    await waitForFrame(view, "query: ab");
+    view.unmount();
+  });
+
+  it("typing 'q' in the search box appends to the query and does not exit", async () => {
+    const view = searchView();
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("quote");
+    await waitForFrame(view, "query: quote");
+    const frame = view.lastFrame();
+    expect(frame).toContain("view: search");
+    view.unmount();
+  });
+
+  it("typing 'r' in the search box appends to the query and does not refresh", async () => {
+    const view = searchView();
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("render");
+    await waitForFrame(view, "query: render");
+    const frame = view.lastFrame();
+    expect(frame).toContain("view: search");
+    view.unmount();
+  });
+
+  it("typing digits in the search box appends to the query and does not switch views", async () => {
+    const view = searchView();
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("1234");
+    await waitForFrame(view, "query: 1234");
+    const frame = view.lastFrame();
+    expect(frame).toContain("view: search");
+    view.unmount();
+  });
+
+  it("typing '?' in the search box appends to the query and does not open help", async () => {
+    const view = searchView();
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("why?");
+    await waitForFrame(view, "query: why?");
+    const frame = view.lastFrame();
+    expect(frame).toContain("view: search");
+    expect(frame).not.toContain("view: help");
+    view.unmount();
+  });
+
+  it("Esc from search returns to the previous non-search view", async () => {
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: sampleClient() }}
+        initialView="topics"
+        initialSnapshot={sampleSnapshot()}
+        searchDependencies={fakeSearchDependencies(searchResults)}
+      />,
+    );
+
+    await waitForFrame(view, "view: topics");
+    view.stdin.write("4");
+    await waitForFrame(view, "view: search");
+    view.stdin.write("\u001b");
+    await waitForFrame(view, "view: topics");
+    expect(view.lastFrame()).toContain("orders partitions=3");
+    view.unmount();
+  });
+
+  it("Esc from search falls back to dashboard when no previous view exists", async () => {
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: sampleClient() }}
+        initialView="search"
+        initialSnapshot={sampleSnapshot()}
+        searchDependencies={fakeSearchDependencies(searchResults)}
+      />,
+    );
+
+    await waitForFrame(view, "view: search");
+    view.stdin.write("\u001b");
+    await waitForFrame(view, "view: dashboard");
+    expect(view.lastFrame()).toContain("broker mode: durable");
+    view.unmount();
+  });
+
+  it("Ctrl+C from search triggers exit", async () => {
+    const onExit = vi.fn();
+    const view = render(
+      <FerrumQTui
+        config={config}
+        dependencies={{ client: pendingClient() }}
+        initialView="search"
+        initialSnapshot={sampleSnapshot()}
+        onExit={onExit}
+        searchDependencies={fakeSearchDependencies(searchResults)}
+      />,
+    );
+
+    await waitForFrame(view, "view: search");
+    view.stdin.write("\u0003");
+    await vi.waitFor(() => expect(onExit).toHaveBeenCalledTimes(1));
+    view.unmount();
+  });
+
+  it("navigation keys still work outside the search view", async () => {
+    const view = searchView();
+    view.stdin.write("1");
+    await waitForFrame(view, "view: dashboard");
+    view.stdin.write("2");
+    await waitForFrame(view, "view: topics");
+    view.stdin.write("3");
+    await waitForFrame(view, "view: dlq");
     view.unmount();
   });
 });
@@ -745,6 +1035,8 @@ describe("TUI CLI runner", () => {
     expect(help.code).toBe(0);
     expect(help.stderr).toEqual([]);
     expect(help.stdout.join("\n")).toContain("ferrumq-tui");
+    expect(help.stdout.join("\n")).toContain("Esc to return");
+    expect(help.stdout.join("\n")).toContain("Ctrl+C to quit");
     expect(renderer.renderTui).not.toHaveBeenCalled();
   });
 
@@ -1059,6 +1351,9 @@ function sampleClient(
     async listDlq() {
       return sampleSnapshot().dlq;
     },
+    async searchMessages() {
+      throw new Error("unexpected searchMessages call");
+    },
     ...overrides,
   };
 }
@@ -1226,4 +1521,43 @@ function restoreOptionalEnv(key: string, value: string | undefined): void {
     return;
   }
   process.env[key] = value;
+}
+
+function emptySearchState(): SearchUiState {
+  return {
+    query: "",
+    topic: "",
+    status: "idle",
+    items: [],
+    errorMessage: undefined,
+    lastSubmittedQuery: undefined,
+    lastSubmittedTopic: undefined,
+  };
+}
+
+function fakeSearchDependencies(
+  results: Array<{
+    topic: string;
+    partitionId: number;
+    offset: string;
+    messageId: string;
+    eventType: string;
+    source: string;
+    subject: string | null;
+    contentType: string;
+    timeUnixMs: string;
+    payloadLen: number;
+    payloadSha256: string;
+    rank: number;
+  }> = [],
+  error: Error | null = null,
+): SearchDependencies {
+  return {
+    searchMessages: async () => {
+      if (error !== null) {
+        throw error;
+      }
+      return { items: results };
+    },
+  };
 }

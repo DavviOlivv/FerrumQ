@@ -11,6 +11,7 @@ export type ParsedCommand =
   | { kind: "consume-help" }
   | { kind: "ack-help" }
   | { kind: "nack-help" }
+  | { kind: "search-help" }
   | { kind: "broker-version" }
   | { kind: "health" }
   | { kind: "ready" }
@@ -19,6 +20,7 @@ export type ParsedCommand =
   | { kind: "topic-get"; topic: string }
   | { kind: "topic-list" }
   | { kind: "dlq-list"; topic?: string }
+  | { kind: "search"; query: string; topic?: string; limit?: string }
   | {
       kind: "publish";
       topic: string;
@@ -176,6 +178,8 @@ function parseCommand(
         return { kind: "ack-help" };
       case "nack":
         return { kind: "nack-help" };
+      case "search":
+        return { kind: "search-help" };
       default:
         return { kind: "root-help" };
     }
@@ -210,6 +214,8 @@ function parseCommand(
       return parseAck(tokens.slice(1));
     case "nack":
       return parseNack(tokens.slice(1));
+    case "search":
+      return parseSearch(tokens.slice(1));
     default:
       throw new ExpectedCliError(`Unknown command: ${command}`);
   }
@@ -340,6 +346,17 @@ function parseNack(tokens: readonly string[]): ParsedCommand {
   };
 }
 
+function parseSearch(tokens: readonly string[]): ParsedCommand {
+  const parsed = parseOptions(tokens, ["topic", "limit"]);
+  assertPositionals(parsed.positionals, 1, "search <query>");
+  return {
+    kind: "search",
+    query: parsed.positionals[0] ?? "",
+    ...optionalProperty("topic", parsed.options.get("topic")),
+    ...optionalProperty("limit", parsed.options.get("limit")),
+  };
+}
+
 function parseOptions(
   tokens: readonly string[],
   allowed: readonly string[],
@@ -411,10 +428,11 @@ function assertPositionals(
   positionals: readonly string[],
   expected: number,
   usage: string,
-): void {
+): readonly string[] {
   if (positionals.length !== expected) {
     throw new ExpectedCliError(`Usage: ferrumq ${usage}`);
   }
+  return positionals;
 }
 
 function rejectOptions(options: Map<string, string>): void {

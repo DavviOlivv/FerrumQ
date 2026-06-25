@@ -1104,6 +1104,7 @@ dependencies = [
  "msg-broker",
  "msg-core",
  "msg-observability",
+ "msg-postgres",
  "serde",
  "serde_json",
  "tempfile",
@@ -1111,6 +1112,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1189,6 +1191,7 @@ dependencies = [
  "msg-postgres",
  "msg-protocol",
  "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1196,6 +1199,7 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

@@ -164,9 +164,9 @@ operation. No new metrics are introduced.
   token. Operators searching for `cloudevents` will not match
   `application/cloudevents+json`. This is acceptable because
   FerrumQ metadata is primarily hyphenated identifiers and event types.
-- Search is limited to the `brokerd postgres search` command. HTTP,
-  gRPC, SDK, CLI, TUI, and chat search are deferred to a future
-  milestone.
+- Search is limited to the `brokerd postgres search` command at the
+  M16 baseline. The HTTP, CLI, and TUI search surfaces are added in
+  [ADR 0020: HTTP, CLI, and TUI Search Exposure](0020-search-http-cli-tui-exposure.md).
 - Search results are a point-in-time snapshot, not live data. Fresh
   publishes require a rebuild to become searchable.
 

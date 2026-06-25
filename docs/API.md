@@ -267,6 +267,82 @@ Status codes:
 
 Reason strings are stable lower snake case for built-in reasons (`max_attempts_exceeded`, `expired`, `rejected`, `poisoned`) and the manual reason text for manual NACK reasons.
 
+### `POST /v1/search/messages`
+
+Searches projected message metadata using the M16 PostgreSQL full-text
+search index. The endpoint is **optional** — it returns `503
+SEARCH_UNAVAILABLE` when the broker is started without a PostgreSQL
+configuration.
+
+HTTP search uses a `POST` JSON body, so raw query text is not placed in
+HTTP URLs, access logs, proxies, or HTTP client logs. FerrumQ logs and
+traces do not persist the raw query. The CLI wrapper still receives
+`ferrumq search "<query>"` as a command argument, so CLI queries may
+appear in shell history and process argv.
+
+Request body:
+
+```json
+{
+  "query": "order created",
+  "topic": "orders",
+  "limit": 20
+}
+```
+
+Fields:
+
+- `query` (string, required): the search text. Must contain at least
+  one alphanumeric character. Empty/blank/punctuation-only inputs
+  return `400 VALIDATION_ERROR`.
+- `topic` (string, optional): exact-match topic filter.
+- `limit` (integer, optional, `1..=100`, default `20`): result cap.
+
+Status codes:
+
+- `200 OK`: search executed (results may be empty).
+- `400 Bad Request`: invalid `query`, `topic`, or `limit`.
+- `503 SEARCH_UNAVAILABLE`: search is not configured (no PostgreSQL
+  URL supplied to `brokerd serve-all`).
+- `500 INTERNAL_ERROR`: sanitized internal failure.
+
+Response body (success):
+
+```json
+{
+  "items": [
+    {
+      "topic": "orders",
+      "partitionId": 0,
+      "offset": "12",
+      "messageId": "msg-1",
+      "eventType": "order.created",
+      "source": "/tests",
+      "subject": "order/1",
+      "contentType": "application/json",
+      "timeUnixMs": "1700000000000",
+      "payloadLen": 128,
+      "payloadSha256": "...",
+      "rank": 0.25
+    }
+  ]
+}
+```
+
+Notes:
+
+- `offset` and `timeUnixMs` are **decimal strings** to preserve full
+  precision across the JSON boundary. The TypeScript protocol enforces
+  this with a strict regex schema.
+- `payloadLen` is a JSON number (it always fits in
+  `Number.MAX_SAFE_INTEGER`).
+- `payloadSha256` is the 64-character hex hash of payload bytes; raw
+  payload bytes are **never** returned.
+- The response excludes `idempotencyKey`, `partitionKey`, `headers`,
+  and raw payload bytes. The TypeScript protocol schema is a closed
+  `z.object` without those fields.
+- The response does **not** echo the raw query.
+
 ## Unsupported HTTP Surface
 
 Known routes called with unsupported methods return `405 Method Not Allowed` with code `METHOD_NOT_ALLOWED`.

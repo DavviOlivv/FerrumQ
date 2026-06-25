@@ -62,6 +62,12 @@ enum Command {
         /// Socket address for the gRPC listener.
         #[arg(long, default_value = "127.0.0.1:9090")]
         grpc_listen: SocketAddr,
+
+        /// Optional PostgreSQL connection URL enabling the
+        /// `POST /v1/search/messages` HTTP endpoint. Falls back to
+        /// `FERRUMQ_DATABASE_URL` when unset. Credentials are never logged.
+        #[arg(long)]
+        postgres_database_url: Option<String>,
     },
 
     /// Manage the PostgreSQL metadata projection store.
@@ -143,6 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             data_dir,
             http_listen,
             grpc_listen,
+            postgres_database_url,
         }) => {
             init_tracing_from_env()?;
             let span = info_span!(
@@ -157,7 +164,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 http_listen = %http_listen,
                 grpc_listen = %grpc_listen
             );
-            serve_all(ServeAllConfig::new(data_dir, http_listen, grpc_listen)).await?;
+            serve_all(
+                ServeAllConfig::new(data_dir, http_listen, grpc_listen)
+                    .with_postgres_database_url(postgres_database_url),
+            )
+            .await?;
         }
         #[cfg(feature = "postgres")]
         Some(Command::Postgres(sub)) => {
@@ -177,7 +188,7 @@ async fn handle_postgres(sub: PostgresSubcommand) -> Result<(), msg_postgres::Po
     match sub {
         PostgresSubcommand::Migrate { database_url } => {
             let config = PostgresConfig::from_env_or_flag(database_url)?;
-            let repo = PostgresRepository::connect(&config).await?;
+            let repo = PostgresRepository::connect(config).await?;
             run_migrations(repo.pool()).await?;
             info!("migrations complete");
             println!("PostgreSQL migrations complete");
@@ -187,7 +198,7 @@ async fn handle_postgres(sub: PostgresSubcommand) -> Result<(), msg_postgres::Po
             database_url,
         } => {
             let config = PostgresConfig::from_env_or_flag(database_url)?;
-            let repo = PostgresRepository::connect(&config).await?;
+            let repo = PostgresRepository::connect(config).await?;
             run_migrations(repo.pool()).await?;
             let result = rebuild_projection(&repo, &data_dir).await?;
             info!(
@@ -209,7 +220,7 @@ async fn handle_postgres(sub: PostgresSubcommand) -> Result<(), msg_postgres::Po
         } => {
             let search_query = SearchQuery::new(query, topic, limit)?;
             let config = PostgresConfig::from_env_or_flag(database_url)?;
-            let repo = PostgresRepository::connect(&config).await?;
+            let repo = PostgresRepository::connect(config).await?;
             run_migrations(repo.pool()).await?;
             let results = repo.search_messages(&search_query).await?;
             log_search_complete(&search_query, results.len(), json);

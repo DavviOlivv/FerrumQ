@@ -5,6 +5,8 @@ pub mod projection;
 pub mod repository;
 
 pub use config::PostgresConfig;
+pub use models::{SearchQuery, SearchResult};
+pub use repository::PostgresRepository;
 
 use thiserror::Error;
 

@@ -16,6 +16,7 @@ import {
   grpcStatusName,
   httpStatusResponseSchema,
   normalizeGrpcTarget,
+  searchMessagesRequestSchema,
   topicListResponseSchema,
   topicResponseSchema,
 } from "../src/index.js";
@@ -106,6 +107,36 @@ describe("HTTP schemas", () => {
         statusCode: 400,
       },
     });
+  });
+
+  it("locks the search request schema as a closed privacy contract", () => {
+    expect(searchMessagesRequestSchema.parse({ query: "order" })).toEqual({
+      query: "order",
+    });
+    expect(
+      searchMessagesRequestSchema.parse({ query: "order", topic: null }),
+    ).toEqual({ query: "order", topic: null });
+    expect(
+      searchMessagesRequestSchema.parse({ query: "order", limit: 10 }),
+    ).toEqual({ query: "order", limit: 10 });
+
+    expect(() => searchMessagesRequestSchema.parse({})).toThrow();
+    expect(() => searchMessagesRequestSchema.parse({ query: "" })).toThrow();
+    expect(() =>
+      searchMessagesRequestSchema.parse({ query: "order", limit: 0 }),
+    ).toThrow();
+    expect(() =>
+      searchMessagesRequestSchema.parse({ query: "order", limit: 101 }),
+    ).toThrow();
+    expect(() =>
+      searchMessagesRequestSchema.parse({ query: "order", topic: "" }),
+    ).toThrow();
+    expect(() =>
+      searchMessagesRequestSchema.parse({
+        query: "order",
+        idempotencyKey: "leak-attempt",
+      }),
+    ).toThrow();
   });
 });
 
@@ -386,6 +417,191 @@ describe("HTTP control-plane client", () => {
     await expect(client.health({ signal: controller.signal })).resolves.toEqual(
       { status: "ok" },
     );
+  });
+
+  it("posts search messages with JSON body and parses decimal-string fields", async () => {
+    const calls: Array<{
+      input: string;
+      init:
+        | {
+            method?: string;
+            headers?: Record<string, string>;
+            body?: string;
+            signal?: AbortSignal;
+          }
+        | undefined;
+    }> = [];
+    const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+      calls.push({ input, init });
+      return response(200, {
+        items: [
+          {
+            topic: "orders",
+            partitionId: 0,
+            offset: "12",
+            messageId: "msg-1",
+            eventType: "order.created",
+            source: "/tests",
+            subject: "order/1",
+            contentType: "application/json",
+            timeUnixMs: "1700000000000",
+            payloadLen: 128,
+            payloadSha256: "0".repeat(64),
+            rank: 0.25,
+          },
+        ],
+      });
+    });
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      fetchImpl,
+    );
+
+    await expect(
+      client.searchMessages({
+        query: "order",
+        topic: "orders",
+        limit: 10,
+      }),
+    ).resolves.toEqual({
+      items: [
+        {
+          topic: "orders",
+          partitionId: 0,
+          offset: "12",
+          messageId: "msg-1",
+          eventType: "order.created",
+          source: "/tests",
+          subject: "order/1",
+          contentType: "application/json",
+          timeUnixMs: "1700000000000",
+          payloadLen: 128,
+          payloadSha256: "0".repeat(64),
+          rank: 0.25,
+        },
+      ],
+    });
+
+    expect(calls).toHaveLength(1);
+    const firstCall = calls[0];
+    expect(firstCall).toBeDefined();
+    expect(firstCall?.init?.method).toBe("POST");
+    expect(firstCall?.input).toBe(
+      "http://control.local:8080/v1/search/messages",
+    );
+    expect(JSON.parse(firstCall?.init?.body ?? "{}")).toEqual({
+      query: "order",
+      topic: "orders",
+      limit: 10,
+    });
+  });
+
+  it("accepts explicit null topic in the search request body", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      response(200, { items: [] }),
+    );
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      fetchImpl,
+    );
+
+    await expect(
+      client.searchMessages({ query: "order", topic: null }),
+    ).resolves.toEqual({ items: [] });
+  });
+
+  it("surfaces 503 SEARCH_UNAVAILABLE from the control plane", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      response(
+        503,
+        {
+          error: {
+            code: "SEARCH_UNAVAILABLE",
+            message: "search is not configured",
+            details: {},
+            statusCode: 503,
+          },
+        },
+        "Service Unavailable",
+      ),
+    );
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      fetchImpl,
+    );
+
+    await expect(
+      client.searchMessages({ query: "order" }),
+    ).rejects.toMatchObject({
+      kind: "ferrumq-error",
+      status: 503,
+      ferrumqError: {
+        code: "SEARCH_UNAVAILABLE",
+        message: "search is not configured",
+        statusCode: 503,
+      },
+    });
+  });
+
+  it("rejects malformed search responses when decimal fields are missing", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      response(200, {
+        items: [
+          {
+            topic: "orders",
+            partitionId: 0,
+            offset: 12,
+            messageId: "msg-1",
+            eventType: "order.created",
+            source: "/tests",
+            subject: "order/1",
+            contentType: "application/json",
+            timeUnixMs: "1700000000000",
+            payloadLen: 128,
+            payloadSha256: "0".repeat(64),
+            rank: 0.25,
+          },
+        ],
+      }),
+    );
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      fetchImpl,
+    );
+
+    await expect(
+      client.searchMessages({ query: "order" }),
+    ).rejects.toMatchObject({
+      kind: "schema",
+      method: "POST",
+      url: "http://control.local:8080/v1/search/messages",
+    });
+  });
+
+  it("validates the outbound search body against the closed schema before sending", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      response(200, { items: [] }),
+    );
+    const client = createControlPlaneClient(
+      "http://control.local:8080",
+      fetchImpl,
+    );
+
+    for (const body of [
+      {},
+      { query: "" },
+      { query: "order", limit: 0 },
+      { query: "order", limit: 101 },
+      { query: "order", topic: "" },
+      { query: "order", idempotencyKey: "leak-attempt" },
+    ]) {
+      await expect(
+        client.searchMessages(
+          body as unknown as Parameters<typeof client.searchMessages>[0],
+        ),
+      ).rejects.toThrow();
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 

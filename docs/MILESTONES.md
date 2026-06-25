@@ -666,3 +666,139 @@ Deferred from Milestone 16:
 - File/blob payload search.
 - Continuous live indexing.
 - Search metrics.
+
+## Milestone 17: Search HTTP, CLI, and TUI Exposure
+
+Exposes the M16 PostgreSQL full-text search foundation through
+user-facing surfaces without changing the broker core, the gRPC data
+plane, or the append-only log invariant. The append-only log remains
+the source of truth; PostgreSQL is still a derived projection.
+
+Done shape:
+
+- `POST /v1/search/messages` HTTP control-plane endpoint backed by an
+  optional `Arc<dyn MessageSearch>` on `AppState`. The endpoint is
+  disabled (returns `503 SEARCH_UNAVAILABLE`) when the broker is
+  started without a PostgreSQL configuration.
+- The endpoint accepts a JSON body
+  `{ "query": "...", "topic": "...", "limit": 20 }`, so raw query text
+  is not placed in HTTP URLs, access logs, proxies, or HTTP client logs.
+  FerrumQ logs and traces do not persist the raw query. CLI queries may
+  still appear in shell history and process argv because they are typed
+  as command arguments. The response does not echo the query.
+- Decimal-string `offset` and `timeUnixMs` in the JSON response
+  (preserves full precision across the JSON boundary). `payloadLen`
+  and `rank` remain JSON numbers. The TypeScript protocol enforces the
+  decimal-string contract via a strict regex schema.
+- The response excludes `idempotencyKey`, `partitionKey`, `headers`,
+  and raw payload bytes. The TypeScript protocol schema is a closed
+  `z.object` without those fields.
+- The handler logs only sanitized fields via
+  `#[tracing::instrument(skip_all)]`: `operation`, `method`, `route`,
+  `outcome`, `result_count`, `limit`, `topic_filter_present` (boolean),
+  `postgres_configured` (boolean). The HTTP status code is recorded
+  by the shared `observe_http_result` helper, which emits the actual
+  status (200, 400, 503) rather than a hardcoded value. No raw query,
+  no query hash, no raw topic value, no message IDs, no idempotency
+  key, no payload bytes, no database URL.
+- `brokerd serve-all` accepts a new `--postgres-database-url <URL>`
+  flag with `FERRUMQ_DATABASE_URL` as the environment fallback. The
+  flag takes precedence. When neither is set, search is disabled
+  (`503 SEARCH_UNAVAILABLE`). When set, the runtime calls
+  `PostgresRepository::connect_with_pool_size(&cfg, 4)` (pool size 4
+  vs. the offline CLI tools' pool size 1) and runs migrations at
+  startup. Migration failures fail startup with a sanitized
+  `RuntimeError::PostgresSetup` message. The URL/credentials are
+  never logged; only `PostgresConfig::sanitized_url()` is emitted.
+- New `PostgresRepository::connect_with_pool_size(config,
+  max_connections)` constructor. The existing `connect()` is
+  preserved as `connect_with_pool_size(config, 1)` to keep the
+  offline CLI tools unchanged. A real-PG integration test
+  (`connect_with_pool_size_supports_serving_workload`) exercises two
+  concurrent `search_messages` calls through the same repository.
+- New `MessageSearch` trait in `msg-control-api` with a single async
+  method that returns `Result<Vec<SearchResult>, String>` (sanitized
+  error). `PostgresRepository` impls the trait (postgres-feature
+  gated). `AppState` holds `Option<Arc<dyn MessageSearch>>`. The
+  adapter uses `sqlx::Executor::execute` / `Executor::fetch_all`
+  directly on `&mut *tx` to avoid `Send` lifetime issues with
+  SQLx's generic async convenience methods. A dedicated
+  `migrations_future_is_send` regression test enforces `Send` for
+  the `run_migrations` future.
+- The TypeScript protocol package adds a `SearchMessagesRequest`
+  schema, a `SearchMessagesResponse` schema, a `SearchResult` schema
+  (no `idempotencyKey`, `partitionKey`, `headers`, or payload fields),
+  a `decimalStringSchema` for `uint64` fields, and a
+  `searchMessages(request, options?)` method on `ControlPlaneClient`
+  that posts the JSON body and parses the response.
+- The `ferrumq search "<query>" --topic <topic> --limit <n> --json`
+  CLI command. The CLI connects to the HTTP control plane and never
+  opens a direct PostgreSQL connection. Human output shows safe
+  metadata and a shortened `payloadSha256` (first 12 hex chars + `…`).
+  `--json` output uses the full 64-character hash and the existing
+  CLI top-level wrapper key (`{ "search": { "items": [...] } }`).
+- The TUI adds a `4 search` view (Unicode-safe inline input on
+  `useState` + `useInput`, Enter to submit, Backspace to edit, capped
+  at 256 characters as a defensive limit). The outer global
+  `useInput` handler is gated on `activeView !== "search"` so global
+  navigation keys (`q`, `r`, `1`–`4`, `?`) do not fire while the
+  user is editing the search query. The view shows
+  idle/loading/empty/error/unavailable states. The TUI does not call
+  the gRPC data plane and does not log the query. TUI-side topic
+  filtering, cursor, scroll, copy/paste, autosuggest, and saved
+  searches are deferred polish.
+- Tests:
+  - 16 control-API tests cover success, decimal-string fields,
+    503 unavailable with no search dependency, validation
+    (empty/whitespace/punctuation-only query, out-of-range limit,
+    invalid topic), validation-before-availability precedence
+    (no PG + invalid input returns 400, not 503), schema
+    (malformed body, missing content type, GET instead of POST,
+    sanitized backend failure), and a log no-leak regression test
+    that the capture contains no raw query or raw topic value.
+  - 6 runtime tests cover `serve-all --help`, 503 with no PG,
+    sanitized startup failure on unreachable PG, sanitized startup
+    failure on invalid `FERRUMQ_DATABASE_URL`, sanitized startup
+    failure on invalid `--postgres-database-url`, and the existing
+    unified runtime test.
+  - 2 compact/json format tests assert that the search
+    `log_search_event` field set does not include the raw query or
+    raw topic value.
+  - 1 msg-postgres send-regression test covers
+    `migrations_future_is_send`.
+  - 1 msg-postgres integration test covers
+    `connect_with_pool_size_supports_serving_workload` (skipped
+    without `FERRUMQ_POSTGRES_TEST_URL`).
+  - 4 protocol tests cover POST with JSON body, decimal-string
+    parsing, 503 `SEARCH_UNAVAILABLE` mapping, and schema rejection
+    of numeric `offset`.
+  - 9 CLI tests cover parser, human output, JSON output, validation
+    (empty query, invalid limit, invalid topic), 503 propagation,
+    privacy (no payload bytes / idempotency key in output), the
+    accurate `search --help` wording (no shell-history claim), and
+    built CLI help.
+  - 10 TUI tests cover view rendering, search submission with
+    Unicode input, unavailable state, backend error state, backspace
+    editing, and regression coverage that printable characters
+    (`q`, `r`, digits, `?`) type into the search box instead of
+    triggering global navigation.
+- Documentation: ADR 0020, `docs/API.md`, `docs/CLI.md`,
+  `docs/TUI.md`, `docs/POSTGRES.md`, `docs/ARCHITECTURE.md`,
+  `docs/OBSERVABILITY.md`, `docs/FAILURE_MODEL.md`, `README.md`.
+
+Status: implemented.
+
+Deferred from Milestone 17:
+
+- Live projection on publish (continuous worker that re-indexes new
+  messages).
+- Search on the gRPC data plane.
+- Search via `pg_trgm` or `unaccent` extensions.
+- Semantic / vector embeddings.
+- Search over header keys and values.
+- TUI search input cursor, scroll, copy/paste, history, autosuggest,
+  saved searches, and topic filter editing.
+- Pagination beyond the bounded `1..=100` limit.
+- Auth, API keys, mTLS, rate limiting.
+- Search in the chat demo.
+- gRPC search RPC.

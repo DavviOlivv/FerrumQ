@@ -16,6 +16,7 @@ import {
   resolveConfig,
   runCli,
 } from "../src/index.js";
+import { searchHelpText } from "../src/help.js";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -157,6 +158,36 @@ describe("command parsing", () => {
       deliveryId: "delivery-1",
       reason: "poison",
     });
+    expect(parseCliArgs(["search", "order"]).command).toEqual({
+      kind: "search",
+      query: "order",
+    });
+    expect(
+      parseCliArgs(["search", "order created", "--topic", "orders"]).command,
+    ).toEqual({
+      kind: "search",
+      query: "order created",
+      topic: "orders",
+    });
+    expect(parseCliArgs(["search", "order", "--limit", "5"]).command).toEqual({
+      kind: "search",
+      query: "order",
+      limit: "5",
+    });
+    expect(parseCliArgs(["search", "--help"]).command).toEqual({
+      kind: "search-help",
+    });
+  });
+
+  it("search help text does not claim the query is hidden from shell history", () => {
+    const text = searchHelpText();
+    expect(text).toContain("FerrumQ search command");
+    expect(text).toContain("POST JSON body");
+    expect(text).not.toMatch(/never appears in (urls|.*shell history)/i);
+    expect(text).not.toMatch(/not in argv/i);
+    expect(text.toLowerCase()).toContain("shell history");
+    expect(text.toLowerCase()).toContain("process argv");
+    expect(text.toLowerCase()).toContain("avoid secrets");
   });
 
   it("parses global flags anywhere", () => {
@@ -371,6 +402,46 @@ describe("human output contracts", () => {
     });
   });
 
+  it("formats search results with shortened sha256 and decimal strings", async () => {
+    const controlClient = stubSearchControlClient([
+      {
+        topic: "orders",
+        partitionId: 0,
+        offset: "12",
+        messageId: "msg-1",
+        eventType: "order.created",
+        source: "/tests",
+        subject: "order/1",
+        contentType: "application/json",
+        timeUnixMs: "1700000000000",
+        payloadLen: 128,
+        payloadSha256: "0".repeat(64),
+        rank: 0.25,
+      },
+    ]);
+
+    await expect(
+      captureRun(["search", "order"], { controlClient }),
+    ).resolves.toEqual({
+      code: 0,
+      stdout: [
+        "orders[0]@12\tmessage=msg-1\tevent=order.created\tsource=/tests\tsubject=order/1\tcontent=application/json\ttime=1700000000000\tpayload_len=128\tsha256=000000000000…\trank=0.25",
+      ],
+      stderr: [],
+    });
+  });
+
+  it("formats an empty search result with a friendly placeholder", async () => {
+    const controlClient = stubSearchControlClient([]);
+    await expect(
+      captureRun(["search", "order"], { controlClient }),
+    ).resolves.toEqual({
+      code: 0,
+      stdout: ["no results"],
+      stderr: [],
+    });
+  });
+
   it("formats data-plane commands", async () => {
     const dataPlaneClient = stubDataPlaneClient();
 
@@ -484,6 +555,79 @@ describe("JSON output contracts", () => {
     );
   });
 
+  it("emits search JSON with the full sha256 and decimal-string fields", async () => {
+    const fullSha = "f".repeat(64);
+    const controlClient = stubSearchControlClient([
+      {
+        topic: "orders",
+        partitionId: 0,
+        offset: "12",
+        messageId: "msg-1",
+        eventType: "order.created",
+        source: "/tests",
+        subject: "order/1",
+        contentType: "application/json",
+        timeUnixMs: "1700000000000",
+        payloadLen: 128,
+        payloadSha256: fullSha,
+        rank: 0.25,
+      },
+    ]);
+
+    expectSuccessfulJson(
+      await captureRun(["--json", "search", "order"], { controlClient }),
+      {
+        search: {
+          items: [
+            {
+              topic: "orders",
+              partitionId: 0,
+              offset: "12",
+              messageId: "msg-1",
+              eventType: "order.created",
+              source: "/tests",
+              subject: "order/1",
+              contentType: "application/json",
+              timeUnixMs: "1700000000000",
+              payloadLen: 128,
+              payloadSha256: fullSha,
+              rank: 0.25,
+            },
+          ],
+        },
+      },
+    );
+  });
+
+  it("search JSON output excludes payload bytes and idempotency keys", async () => {
+    const controlClient = stubSearchControlClient([
+      {
+        topic: "orders",
+        partitionId: 0,
+        offset: "12",
+        messageId: "msg-1",
+        eventType: "order.created",
+        source: "/tests",
+        subject: "order/1",
+        contentType: "application/json",
+        timeUnixMs: "1700000000000",
+        payloadLen: 128,
+        payloadSha256: "0".repeat(64),
+        rank: 0.25,
+      },
+    ]);
+
+    const result = await captureRun(["--json", "search", "order"], {
+      controlClient,
+    });
+    const rendered = result.stdout.join("\n");
+    expect(rendered).not.toContain("idempotency");
+    expect(rendered).not.toContain("idempotencyKey");
+    expect(rendered).not.toContain('payload":');
+    expect(rendered).not.toContain("partitionKey");
+    expect(rendered).not.toContain("headers");
+  });
+
   it("writes one JSON object and no stderr for data-plane successes", async () => {
     const dataPlaneClient = stubDataPlaneClient();
 
@@ -579,6 +723,50 @@ describe("validation and expected failures", () => {
     expect(invalidMax.stderr.join("\n")).toContain(
       "--max must be a positive integer",
     );
+  });
+
+  it("rejects empty or punctuation-only search queries", async () => {
+    for (const query of ["", "   ", "...", "!!!"]) {
+      const result = await captureRun(["search", query], {
+        controlClient: unreachableControlClient(),
+      });
+      expect(result.code, `query=${JSON.stringify(query)}`).toBe(1);
+      expect(result.stderr.join("\n")).toContain("search query");
+    }
+  });
+
+  it("rejects out-of-range --limit on search", async () => {
+    for (const limit of ["0", "101", "abc"]) {
+      const result = await captureRun(["search", "order", "--limit", limit], {
+        controlClient: unreachableControlClient(),
+      });
+      expect(result.code, `limit=${JSON.stringify(limit)}`).toBe(1);
+      expect(result.stderr.join("\n")).toMatch(/--limit/);
+    }
+  });
+
+  it("rejects invalid --topic on search", async () => {
+    const result = await captureRun(
+      ["search", "order", "--topic", "bad topic"],
+      { controlClient: unreachableControlClient() },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr.join("\n")).toContain("topic contains invalid");
+  });
+
+  it("propagates SEARCH_UNAVAILABLE with a non-zero exit code", async () => {
+    const controlClient: ControlPlaneClient = {
+      ...unreachableControlClient(),
+      async searchMessages() {
+        throw new Error(
+          "HTTP 503 SEARCH_UNAVAILABLE: search is not configured",
+        );
+      },
+    };
+    const result = await captureRun(["search", "order"], { controlClient });
+    expect(result.code).toBe(1);
+    expect(result.stderr.join("\n")).toContain("SEARCH_UNAVAILABLE");
+    expect(result.stderr.join("\n")).toContain("search is not configured");
   });
 
   it("formats gRPC status errors without stack traces", async () => {
@@ -1017,6 +1205,33 @@ function stubControlClient(): ControlPlaneClient {
         ],
       };
     },
+    async searchMessages() {
+      return { items: [] };
+    },
+  };
+}
+
+function stubSearchControlClient(
+  results: Array<{
+    topic: string;
+    partitionId: number;
+    offset: string;
+    messageId: string;
+    eventType: string;
+    source: string;
+    subject: string | null;
+    contentType: string;
+    timeUnixMs: string;
+    payloadLen: number;
+    payloadSha256: string;
+    rank: number;
+  }>,
+): ControlPlaneClient {
+  return {
+    ...stubControlClient(),
+    async searchMessages() {
+      return { items: results };
+    },
   };
 }
 
@@ -1087,6 +1302,9 @@ function unreachableControlClient(): ControlPlaneClient {
     },
     async listDlq() {
       throw new Error("unexpected listDlq call");
+    },
+    async searchMessages() {
+      throw new Error("unexpected searchMessages call");
     },
   };
 }

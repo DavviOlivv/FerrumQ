@@ -74,6 +74,9 @@ ferrumq topic get orders
 ferrumq topic list
 ferrumq dlq list
 ferrumq dlq list --topic orders
+ferrumq search "order created"
+ferrumq search "payment" --topic orders --limit 10
+ferrumq search "payment" --json
 ```
 
 `GET /metrics` is available on the HTTP control plane as an operational
@@ -119,6 +122,30 @@ Wrappers are:
 - `{ "messages": [...] }`.
 - `{ "ack": { "deliveryId", "consumerId" } }`.
 - `{ "nack": { "deliveryId", "consumerId", "reason" } }`.
+- `{ "search": { "items": [...] } }`.
+
+## Search
+
+`ferrumq search "<query>" [--topic <topic>] [--limit <n>] [--json]` issues
+a `POST /v1/search/messages` request against the running broker's HTTP
+control plane. HTTP search sends the query in the JSON body, so raw
+query text is not placed in HTTP URLs, access logs, proxies, or HTTP
+client logs. FerrumQ logs and traces do not persist the raw query.
+Because `ferrumq search "<query>"` receives the query as a CLI
+argument, the query may still appear in shell history and process argv.
+Avoid secrets as CLI search queries when local shell history or process
+visibility matters.
+
+The CLI does **not** open a direct PostgreSQL connection. It depends
+on the broker being started with `--postgres-database-url` or
+`FERRUMQ_DATABASE_URL`. When the broker is not configured for search,
+the CLI surfaces the `SEARCH_UNAVAILABLE` error and exits non-zero.
+
+Decimal-string fields (`offset`, `timeUnixMs`) are preserved as
+strings in both human and `--json` output. The `payloadSha256` is
+shown shortened (first 12 characters + `…`) in human output and full
+64-character hex in `--json` output. Raw payload bytes and idempotency
+keys are never returned.
 
 gRPC `uint64` response fields are rendered as decimal strings in JSON so large
 offsets and timestamps are not truncated by JavaScript number limits.

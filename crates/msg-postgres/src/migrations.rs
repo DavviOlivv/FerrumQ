@@ -1,4 +1,4 @@
-use sqlx::{PgPool, Row};
+use sqlx::{Executor, PgPool, Row};
 use tracing::info;
 
 use crate::PostgresError;
@@ -26,19 +26,36 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), PostgresError> {
         .await
         .map_err(|source| PostgresError::migration("transaction start", source))?;
 
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(MIGRATION_LOCK_ID)
-        .execute(&mut *tx)
-        .await
-        .map_err(|source| PostgresError::migration("migration serialization", source))?;
+    // Call `Executor` directly so each transaction borrow has an explicit
+    // boxed-future lifetime. SQLx's generic async convenience methods can
+    // otherwise make this outer future fail the `Send` bound used by
+    // `tokio::spawn`.
+    Executor::execute(
+        &mut *tx,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(MIGRATION_LOCK_ID),
+    )
+    .await
+    .map_err(|source| PostgresError::migration("migration serialization", source))?;
 
-    ensure_migrations_table(&mut tx).await?;
+    Executor::execute(
+        &mut *tx,
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS _ferrumq_migrations (
+            version     INTEGER PRIMARY KEY,
+            applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            name        TEXT NOT NULL
+        )",
+        ),
+    )
+    .await
+    .map_err(|source| PostgresError::migration("migration table creation", source))?;
 
-    let applied =
-        sqlx::query("SELECT version, name FROM _ferrumq_migrations ORDER BY version FOR UPDATE")
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|source| PostgresError::migration("migration metadata read", source))?;
+    let applied = Executor::fetch_all(
+        &mut *tx,
+        sqlx::query("SELECT version, name FROM _ferrumq_migrations ORDER BY version FOR UPDATE"),
+    )
+    .await
+    .map_err(|source| PostgresError::migration("migration metadata read", source))?;
 
     validate_applied_migrations(&applied)?;
 
@@ -47,17 +64,18 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), PostgresError> {
             i32::try_from(index + 1).map_err(|_| PostgresError::InconsistentMigrationMetadata)?;
         info!(version, migration = %name, "applying migration");
 
-        sqlx::raw_sql(sql)
-            .execute(&mut *tx)
+        Executor::execute(&mut *tx, sqlx::raw_sql(sql))
             .await
             .map_err(|source| PostgresError::migration("migration SQL", source))?;
 
-        sqlx::query("INSERT INTO _ferrumq_migrations (version, name) VALUES ($1, $2)")
-            .bind(version)
-            .bind(name)
-            .execute(&mut *tx)
-            .await
-            .map_err(|source| PostgresError::migration("migration tracking", source))?;
+        Executor::execute(
+            &mut *tx,
+            sqlx::query("INSERT INTO _ferrumq_migrations (version, name) VALUES ($1, $2)")
+                .bind(version)
+                .bind(name),
+        )
+        .await
+        .map_err(|source| PostgresError::migration("migration tracking", source))?;
 
         info!(version, migration = %name, "migration applied");
     }
@@ -90,23 +108,6 @@ fn validate_applied_migrations(rows: &[sqlx::postgres::PgRow]) -> Result<(), Pos
             return Err(PostgresError::InconsistentMigrationMetadata);
         }
     }
-
-    Ok(())
-}
-
-async fn ensure_migrations_table(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<(), PostgresError> {
-    sqlx::raw_sql(
-        "CREATE TABLE IF NOT EXISTS _ferrumq_migrations (
-            version     INTEGER PRIMARY KEY,
-            applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-            name        TEXT NOT NULL
-        )",
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|source| PostgresError::migration("migration table creation", source))?;
 
     Ok(())
 }
